@@ -1,0 +1,16 @@
+venv/
+__pycache__/
+*.pyc
+
+output/
+runs/
+
+*.pt
+*.pth
+
+embeddings/
+crops/
+
+*.avi
+*.mp4
+*.swp
