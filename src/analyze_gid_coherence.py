@@ -20,10 +20,11 @@ RESULT_CSV = (
 
 
 # ============================================================
-# MANUALLY VERIFIED SAME-PERSON GROUPS
+# REFERENCE SAME-PERSON / CANDIDATE GROUPS
 # ============================================================
 
-VERIFIED_GROUPS = {
+REFERENCE_GROUPS = {
+
     "A_112": [
         (0, 112),
         (1, 41),
@@ -35,9 +36,19 @@ VERIFIED_GROUPS = {
         (1, 423),
     ],
 
+    # c1:503 was REMOVED from this group.
+    #
+    # Geometry:
+    # c0:399 <-> c1:382
+    # median distance ~= 16
+    #
+    # c0:399 <-> c1:503
+    # median distance ~= 347
+    #
+    # Therefore c1:503 is physically incompatible
+    # with c0:399 during synchronized observations.
     "C_399": [
         (0, 399),
-        (1, 503),
         (1, 382),
         (1, 319),
     ],
@@ -75,10 +86,31 @@ VERIFIED_GROUPS = {
         (0, 255),
         (1, 298),
     ],
+
+    # --------------------------------------------------------
+    # Geometry-supported cross-camera bridge candidate.
+    #
+    # c0:469 <-> c1:503
+    # median ~= 15.87
+    #
+    # c0:600 <-> c1:503
+    # median ~= 15.69
+    #
+    # c0:469 and c0:600 do not overlap in time.
+    # --------------------------------------------------------
+
+    "J_503": [
+        (0, 469),
+        (0, 600),
+        (1, 503),
+    ],
 }
 
 
-# Suspicious final GIDs from the offline run.
+# ============================================================
+# SUSPICIOUS GIDS FROM FIRST OFFLINE RUN
+# ============================================================
+
 SUSPICIOUS_GIDS = [
     1,
     2,
@@ -88,6 +120,10 @@ SUSPICIOUS_GIDS = [
     44,
 ]
 
+
+# ============================================================
+# LOAD EMBEDDING
+# ============================================================
 
 def load_embedding(
     camera_id,
@@ -100,7 +136,15 @@ def load_embedding(
         / f"track_{track_id}.npy"
     )
 
-    embedding = np.load(path).astype(
+    if not path.exists():
+
+        raise FileNotFoundError(
+            f"Embedding not found: {path}"
+        )
+
+    embedding = np.load(
+        path
+    ).astype(
         np.float32
     )
 
@@ -108,8 +152,21 @@ def load_embedding(
         embedding
     )
 
-    return embedding / norm
+    if norm == 0:
 
+        raise ValueError(
+            f"Zero-norm embedding: {path}"
+        )
+
+    return (
+        embedding
+        / norm
+    )
+
+
+# ============================================================
+# LOAD EMBEDDINGS FOR GROUP
+# ============================================================
 
 def group_embeddings(
     members,
@@ -132,6 +189,10 @@ def group_embeddings(
     )
 
 
+# ============================================================
+# INTERNAL GROUP COHERENCE
+# ============================================================
+
 def coherence_statistics(
     members,
 ):
@@ -146,53 +207,94 @@ def coherence_statistics(
 
     pair_scores = []
 
+
+    # --------------------------------------------------------
+    # All pairwise cosine similarities inside the group.
+    # --------------------------------------------------------
+
     for i in range(n):
 
-        for j in range(i + 1, n):
+        for j in range(
+            i + 1,
+            n,
+        ):
+
+            similarity = float(
+                embeddings[i]
+                @ embeddings[j]
+            )
 
             pair_scores.append(
-                float(
-                    embeddings[i]
-                    @ embeddings[j]
-                )
+                similarity
             )
+
+
+    # --------------------------------------------------------
+    # Group centroid
+    # --------------------------------------------------------
 
     centroid = np.mean(
         embeddings,
         axis=0,
     )
 
-    centroid /= np.linalg.norm(
+    centroid_norm = np.linalg.norm(
         centroid
     )
+
+    if centroid_norm == 0:
+
+        raise ValueError(
+            "Group centroid has zero norm"
+        )
+
+    centroid = (
+        centroid
+        / centroid_norm
+    )
+
 
     centroid_scores = (
         embeddings
         @ centroid
     )
 
+
+    # --------------------------------------------------------
+    # Pairwise statistics
+    # --------------------------------------------------------
+
     if pair_scores:
 
-        pair_min = min(
-            pair_scores
+        pair_min = float(
+            np.min(
+                pair_scores
+            )
         )
 
         pair_mean = float(
-            np.mean(pair_scores)
+            np.mean(
+                pair_scores
+            )
         )
 
         pair_median = float(
-            np.median(pair_scores)
+            np.median(
+                pair_scores
+            )
         )
 
     else:
 
+        # One-member identity.
         pair_min = 1.0
         pair_mean = 1.0
         pair_median = 1.0
 
+
     return {
-        "members": n,
+        "members":
+            n,
 
         "pair_min":
             pair_min,
@@ -219,32 +321,40 @@ def coherence_statistics(
     }
 
 
+# ============================================================
+# COMPARE TWO DIFFERENT GROUPS
+# ============================================================
+
 def cross_group_statistics(
     members_a,
     members_b,
 ):
 
-    a = group_embeddings(
+    embeddings_a = group_embeddings(
         members_a
     )
 
-    b = group_embeddings(
+    embeddings_b = group_embeddings(
         members_b
     )
 
+
     scores = (
-        a
-        @ b.T
+        embeddings_a
+        @ embeddings_b.T
     ).reshape(-1)
+
 
     sorted_scores = np.sort(
         scores
     )[::-1]
 
+
     top_count = min(
         3,
         len(sorted_scores),
     )
+
 
     return {
         "max":
@@ -264,21 +374,37 @@ def cross_group_statistics(
         "mean":
             float(
                 np.mean(
-                    sorted_scores
+                    scores
                 )
             ),
     }
 
 
+# ============================================================
+# LOAD FINAL GIDS FROM OFFLINE EXPERIMENT
+# ============================================================
+
 def load_final_gids():
 
     gids = {}
 
-    with RESULT_CSV.open() as file:
+
+    if not RESULT_CSV.exists():
+
+        raise FileNotFoundError(
+            f"Offline GID CSV not found: "
+            f"{RESULT_CSV}"
+        )
+
+
+    with RESULT_CSV.open(
+        "r"
+    ) as file:
 
         reader = csv.DictReader(
             file
         )
+
 
         for row in reader:
 
@@ -286,12 +412,15 @@ def load_final_gids():
                 "global_id"
             ]
 
+
             if not gid_text:
                 continue
+
 
             gid = int(
                 gid_text
             )
+
 
             camera_id = int(
                 row[
@@ -299,11 +428,13 @@ def load_final_gids():
                 ]
             )
 
+
             track_id = int(
                 row[
                     "local_track_id"
                 ]
             )
+
 
             gids.setdefault(
                 gid,
@@ -315,8 +446,13 @@ def load_final_gids():
                 )
             )
 
+
     return gids
 
+
+# ============================================================
+# PRINT COHERENCE STATS
+# ============================================================
 
 def print_stats(
     name,
@@ -334,14 +470,19 @@ def print_stats(
     )
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
 
     print()
-    print("VERIFIED SAME-PERSON COHERENCE")
-    print("==============================")
+    print("REFERENCE GROUP COHERENCE")
+    print("=========================")
+
 
     for name, members in (
-        VERIFIED_GROUPS.items()
+        REFERENCE_GROUPS.items()
     ):
 
         stats = coherence_statistics(
@@ -354,35 +495,56 @@ def main():
         )
 
 
+    # ========================================================
+    # KNOWN / SUSPECTED DIFFERENT GROUPS
+    # ========================================================
+
     print()
-    print("KNOWN DIFFERENT-GROUP COMPARISON")
-    print("================================")
+    print("DIFFERENT-GROUP APPEARANCE COMPARISON")
+    print("=====================================")
+
 
     comparisons = [
+
+        # Look-alike groups that caused the first
+        # offline GID contamination.
         (
             "D_701",
             "F_492",
         ),
+
         (
             "C_399",
             "I_255",
         ),
+
+        # Important corrected relationship:
+        #
+        # c1:503 was previously associated with C_399,
+        # but geometry strongly contradicts that.
+        (
+            "C_399",
+            "J_503",
+        ),
+
         (
             "D_701",
             "E_707",
         ),
     ]
 
+
     for name_a, name_b in comparisons:
 
         stats = cross_group_statistics(
-            VERIFIED_GROUPS[
+            REFERENCE_GROUPS[
                 name_a
             ],
-            VERIFIED_GROUPS[
+            REFERENCE_GROUPS[
                 name_b
             ],
         )
+
 
         print(
             f"{name_a:<8} vs "
@@ -393,17 +555,24 @@ def main():
         )
 
 
+    # ========================================================
+    # COHERENCE OF BAD/OFFLINE GIDS
+    # ========================================================
+
     print()
     print("SUSPICIOUS FINAL GID COHERENCE")
     print("==============================")
 
+
     final_gids = load_final_gids()
+
 
     for gid in SUSPICIOUS_GIDS:
 
         members = final_gids.get(
             gid
         )
+
 
         if not members:
 
@@ -413,9 +582,11 @@ def main():
 
             continue
 
+
         stats = coherence_statistics(
             members
         )
+
 
         print_stats(
             f"GID_{gid:04d}",
