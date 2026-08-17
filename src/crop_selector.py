@@ -1,37 +1,13 @@
 from pathlib import Path
 from collections import defaultdict
+import argparse
 
 import cv2
 
 from build_tracklets import load_tracklets
 
 
-# ============================================================
-# PATHS
-# ============================================================
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-TRACK_CSV = (
-    PROJECT_ROOT
-    / "output"
-    / "terrace_bytetrack_tuned"
-    / "tracks_c0.csv"
-)
-
-VIDEO_PATH = (
-    PROJECT_ROOT
-    / "data"
-    / "videos"
-    / "terrace1-c0.avi"
-)
-
-OUTPUT_DIR = (
-    PROJECT_ROOT
-    / "output"
-    / "terrace_crops"
-    / "c0"
-)
 
 
 # ============================================================
@@ -39,12 +15,58 @@ OUTPUT_DIR = (
 # ============================================================
 
 MIN_DETECTIONS = 25
-
 CROPS_PER_TRACKLET = 8
 
 
 # ============================================================
-# SELECT REPRESENTATIVE DETECTIONS
+# ARGUMENTS
+# ============================================================
+
+parser = argparse.ArgumentParser(
+    description="Extract representative Terrace person crops"
+)
+
+parser.add_argument(
+    "--camera",
+    type=int,
+    required=True,
+    choices=[0, 1, 2, 3],
+    help="Terrace camera number",
+)
+
+args = parser.parse_args()
+
+camera_id = args.camera
+
+
+# ============================================================
+# PATHS
+# ============================================================
+
+TRACK_CSV = (
+    PROJECT_ROOT
+    / "output"
+    / "terrace_bytetrack_tuned"
+    / f"tracks_c{camera_id}.csv"
+)
+
+VIDEO_PATH = (
+    PROJECT_ROOT
+    / "data"
+    / "videos"
+    / f"terrace1-c{camera_id}.avi"
+)
+
+OUTPUT_DIR = (
+    PROJECT_ROOT
+    / "output"
+    / "terrace_crops"
+    / f"c{camera_id}"
+)
+
+
+# ============================================================
+# REPRESENTATIVE DETECTION SELECTION
 # ============================================================
 
 def select_detections(tracklet, count):
@@ -77,14 +99,20 @@ def select_detections(tracklet, count):
 
 def main():
 
+    if not TRACK_CSV.exists():
+        raise FileNotFoundError(
+            f"Track CSV not found: {TRACK_CSV}"
+        )
+
+    if not VIDEO_PATH.exists():
+        raise FileNotFoundError(
+            f"Video not found: {VIDEO_PATH}"
+        )
+
     OUTPUT_DIR.mkdir(
         parents=True,
         exist_ok=True,
     )
-
-    # --------------------------------------------------------
-    # LOAD TRACKLETS
-    # --------------------------------------------------------
 
     tracklets = load_tracklets(
         TRACK_CSV
@@ -101,28 +129,14 @@ def main():
     print("====================")
     print()
 
-    print(
-        f"Useful tracklets: {len(useful_tracklets)}"
-    )
-
-    print(
-        f"Maximum crops per tracklet: {CROPS_PER_TRACKLET}"
-    )
-
+    print(f"Camera:             c{camera_id}")
+    print(f"Useful tracklets:   {len(useful_tracklets)}")
+    print(f"Crops per tracklet: {CROPS_PER_TRACKLET}")
     print()
 
-    # --------------------------------------------------------
-    # BUILD FRAME LOOKUP
-    # --------------------------------------------------------
-    #
-    # Instead of seeking the video for every crop:
-    #
-    # frame 121 -> [(tracklet, detection), ...]
-    # frame 453 -> [(tracklet, detection), ...]
-    #
-    # Then we read the video only ONCE.
-    #
-    # --------------------------------------------------------
+    # ========================================================
+    # FRAME REQUEST LOOKUP
+    # ========================================================
 
     frame_requests = defaultdict(list)
 
@@ -144,27 +158,22 @@ def main():
                 )
             )
 
-    requested_frames = set(
-        frame_requests.keys()
-    )
-
     print(
-        f"Unique video frames needed: "
-        f"{len(requested_frames)}"
+        f"Unique frames requested: "
+        f"{len(frame_requests)}"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # OPEN VIDEO
-    # --------------------------------------------------------
+    # ========================================================
 
     cap = cv2.VideoCapture(
         str(VIDEO_PATH)
     )
 
     if not cap.isOpened():
-
         raise RuntimeError(
-            f"Could not open video: {VIDEO_PATH}"
+            f"Could not open: {VIDEO_PATH}"
         )
 
     total_frames = int(
@@ -173,12 +182,11 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # SINGLE SEQUENTIAL PASS
-    # --------------------------------------------------------
+    # ========================================================
+    # SEQUENTIAL VIDEO PASS
+    # ========================================================
 
     frame_index = 0
-
     total_saved = 0
 
     while True:
@@ -188,16 +196,13 @@ def main():
         if not ok:
             break
 
-        # Only process frames that contain requested crops
         if frame_index in frame_requests:
 
             height, width = frame.shape[:2]
 
-            requests = frame_requests[
+            for tracklet, detection in frame_requests[
                 frame_index
-            ]
-
-            for tracklet, detection in requests:
+            ]:
 
                 x1 = max(
                     0,
@@ -230,10 +235,6 @@ def main():
                 if crop.size == 0:
                     continue
 
-                # --------------------------------------------
-                # TRACK-SPECIFIC OUTPUT DIRECTORY
-                # --------------------------------------------
-
                 track_dir = (
                     OUTPUT_DIR
                     / f"track_{tracklet.local_track_id}"
@@ -244,21 +245,15 @@ def main():
                     exist_ok=True,
                 )
 
-                # --------------------------------------------
-                # SAVE CROP
-                # --------------------------------------------
-
                 crop_path = (
                     track_dir
                     / f"frame_{frame_index:06d}.jpg"
                 )
 
-                success = cv2.imwrite(
+                if cv2.imwrite(
                     str(crop_path),
                     crop,
-                )
-
-                if success:
+                ):
                     total_saved += 1
 
         frame_index += 1
@@ -266,38 +261,23 @@ def main():
         if frame_index % 500 == 0:
 
             print(
-                f"Read "
-                f"{frame_index}/"
+                f"Read {frame_index}/"
                 f"{total_frames} frames | "
-                f"saved {total_saved} crops"
+                f"saved {total_saved}"
             )
 
     cap.release()
-
-    # --------------------------------------------------------
-    # SUMMARY
-    # --------------------------------------------------------
 
     print()
     print("Crop extraction completed")
     print("=========================")
     print()
 
-    print(
-        f"Video frames read:  {frame_index}"
-    )
-
-    print(
-        f"Tracklets:          {len(useful_tracklets)}"
-    )
-
-    print(
-        f"Crops saved:        {total_saved}"
-    )
-
-    print(
-        f"Output directory:   {OUTPUT_DIR}"
-    )
+    print(f"Camera:            c{camera_id}")
+    print(f"Frames read:       {frame_index}")
+    print(f"Tracklets:         {len(useful_tracklets)}")
+    print(f"Crops saved:       {total_saved}")
+    print(f"Output directory:  {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":
