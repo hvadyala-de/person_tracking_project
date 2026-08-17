@@ -1,0 +1,314 @@
+from dataclasses import dataclass
+from typing import Optional
+
+import numpy as np
+
+try:
+    from .global_identity import GlobalIdentity
+except ImportError:
+    from global_identity import GlobalIdentity
+
+
+@dataclass
+class MatchResult:
+    status: str
+    global_id: Optional[int]
+
+    max_similarity: float
+    mean_similarity: float
+    topk_similarity: float
+
+
+class GlobalIdentityManager:
+
+    def __init__(self):
+
+        self.identities = {}
+
+        self.next_global_id = 1
+
+        # ------------------------------------------------
+        # Temporary thresholds learned from Terrace C0/C1
+        # ------------------------------------------------
+
+        self.same_camera_strong = 0.92
+        self.same_camera_pending = 0.88
+
+        self.cross_camera_strong = 0.90
+        self.cross_camera_pending = 0.84
+
+
+    # ====================================================
+    # CREATE NEW GID
+    # ====================================================
+
+    def create_identity(
+        self,
+        camera_id,
+        local_track_id,
+        start_frame,
+        end_frame,
+        embedding,
+    ):
+
+        gid = self.next_global_id
+
+        identity = GlobalIdentity(
+            global_id=gid
+        )
+
+        identity.add_member(
+            camera_id=camera_id,
+            local_track_id=local_track_id,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            embedding=embedding,
+        )
+
+        self.identities[gid] = identity
+
+        self.next_global_id += 1
+
+        return gid
+
+
+    # ====================================================
+    # ADD TRACK TO EXISTING GID
+    # ====================================================
+
+    def add_to_identity(
+        self,
+        global_id,
+        camera_id,
+        local_track_id,
+        start_frame,
+        end_frame,
+        embedding,
+    ):
+
+        if global_id not in self.identities:
+
+            raise KeyError(
+                f"GID_{global_id:04d} does not exist"
+            )
+
+        self.identities[
+            global_id
+        ].add_member(
+            camera_id=camera_id,
+            local_track_id=local_track_id,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            embedding=embedding,
+        )
+
+
+    # ====================================================
+    # SCORE ONE GID
+    # ====================================================
+
+    def score_identity(
+        self,
+        identity,
+        embedding,
+    ):
+
+        return {
+            "max": identity.max_similarity(
+                embedding
+            ),
+
+            "mean": identity.mean_similarity(
+                embedding
+            ),
+
+            "topk": identity.topk_similarity(
+                embedding,
+                k=3,
+            ),
+        }
+
+
+    # ====================================================
+    # FIND BEST EXISTING GID
+    # ====================================================
+
+    def find_best_identity(
+        self,
+        embedding,
+    ):
+
+        if not self.identities:
+            return None
+
+        candidates = []
+
+        for gid, identity in self.identities.items():
+
+            scores = self.score_identity(
+                identity,
+                embedding,
+            )
+
+            candidates.append(
+                (
+                    scores["topk"],
+                    scores["max"],
+                    scores["mean"],
+                    gid,
+                )
+            )
+
+        candidates.sort(
+            reverse=True
+        )
+
+        topk_score, max_score, mean_score, gid = (
+            candidates[0]
+        )
+
+        return {
+            "global_id": gid,
+            "topk": topk_score,
+            "max": max_score,
+            "mean": mean_score,
+        }
+
+
+    # ====================================================
+    # EVALUATE NEW TRACKLET
+    # ====================================================
+
+    def evaluate(
+        self,
+        camera_id,
+        embedding,
+    ):
+
+        best = self.find_best_identity(
+            embedding
+        )
+
+        # No existing identities yet.
+        if best is None:
+
+            return MatchResult(
+                status="NEW",
+                global_id=None,
+                max_similarity=-1.0,
+                mean_similarity=-1.0,
+                topk_similarity=-1.0,
+            )
+
+
+        identity = self.identities[
+            best["global_id"]
+        ]
+
+
+        # ------------------------------------------------
+        # Determine whether this is same-camera or
+        # cross-camera matching.
+        # ------------------------------------------------
+
+        same_camera = (
+            camera_id
+            in identity.cameras_seen
+        )
+
+
+        if same_camera:
+
+            strong_threshold = (
+                self.same_camera_strong
+            )
+
+            pending_threshold = (
+                self.same_camera_pending
+            )
+
+        else:
+
+            strong_threshold = (
+                self.cross_camera_strong
+            )
+
+            pending_threshold = (
+                self.cross_camera_pending
+            )
+
+
+        # ------------------------------------------------
+        # Decision logic
+        #
+        # max:
+        #     strongest individual gallery match
+        #
+        # topk:
+        #     support from multiple gallery embeddings
+        # ------------------------------------------------
+
+        if (
+            best["max"] >= strong_threshold
+            and best["topk"] >= pending_threshold
+        ):
+
+            status = "STRONG"
+
+        elif (
+            best["max"] >= pending_threshold
+        ):
+
+            status = "PENDING"
+
+        else:
+
+            status = "NEW"
+
+
+        # ------------------------------------------------
+        # IMPORTANT:
+        #
+        # If this is classified as NEW, do not return an
+        # existing GID as a recommendation.
+        # ------------------------------------------------
+
+        if status == "NEW":
+
+            suggested_gid = None
+
+        else:
+
+            suggested_gid = best[
+                "global_id"
+            ]
+
+
+        return MatchResult(
+            status=status,
+            global_id=suggested_gid,
+            max_similarity=best["max"],
+            mean_similarity=best["mean"],
+            topk_similarity=best["topk"],
+        )
+
+
+    # ====================================================
+    # SUMMARY
+    # ====================================================
+
+    def summary(self):
+
+        print()
+        print("GLOBAL IDENTITIES")
+        print("=================")
+
+        for gid in sorted(
+            self.identities
+        ):
+
+            print(
+                self.identities[
+                    gid
+                ].summary()
+            )
