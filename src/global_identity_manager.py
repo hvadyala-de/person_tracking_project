@@ -9,8 +9,13 @@ except ImportError:
     from identity_compatibility import identity_has_conflict
 
 
+# ============================================================
+# MATCH RESULT
+# ============================================================
+
 @dataclass
 class MatchResult:
+
     status: str
     global_id: Optional[int]
 
@@ -23,8 +28,13 @@ class MatchResult:
     score_margin: Optional[float]
 
 
+# ============================================================
+# ASSIGNMENT RESULT
+# ============================================================
+
 @dataclass
 class AssignmentResult:
+
     status: str
     global_id: Optional[int]
 
@@ -34,6 +44,10 @@ class AssignmentResult:
     match: MatchResult
 
 
+# ============================================================
+# GLOBAL IDENTITY MANAGER
+# ============================================================
+
 class GlobalIdentityManager:
 
     def __init__(self):
@@ -42,11 +56,18 @@ class GlobalIdentityManager:
 
         self.next_global_id = 1
 
-        # ------------------------------------------------
+        # ----------------------------------------------------
+        # Unresolved tracklets are stored here.
+        # ----------------------------------------------------
+
+        self.pending_tracklets = {}
+
+        # ----------------------------------------------------
         # TEMPORARY TERRACE THRESHOLDS
         #
-        # These are not final production thresholds.
-        # ------------------------------------------------
+        # These are experimental values.
+        # They are not final production thresholds.
+        # ----------------------------------------------------
 
         self.same_camera_strong = 0.92
         self.same_camera_pending = 0.88
@@ -55,9 +76,9 @@ class GlobalIdentityManager:
         self.cross_camera_pending = 0.84
 
 
-    # ====================================================
+    # ========================================================
     # CREATE NEW GID
-    # ====================================================
+    # ========================================================
 
     def create_identity(
         self,
@@ -89,9 +110,9 @@ class GlobalIdentityManager:
         return gid
 
 
-    # ====================================================
+    # ========================================================
     # ADD TRACKLET TO EXISTING GID
-    # ====================================================
+    # ========================================================
 
     def add_to_identity(
         self,
@@ -120,9 +141,9 @@ class GlobalIdentityManager:
         )
 
 
-    # ====================================================
-    # SCORE ONE GID
-    # ====================================================
+    # ========================================================
+    # SCORE ONE IDENTITY
+    # ========================================================
 
     def score_identity(
         self,
@@ -146,9 +167,9 @@ class GlobalIdentityManager:
         }
 
 
-    # ====================================================
+    # ========================================================
     # FIND BEST AND SECOND-BEST GID
-    # ====================================================
+    # ========================================================
 
     def find_best_identity(
         self,
@@ -167,11 +188,6 @@ class GlobalIdentityManager:
 
             # ------------------------------------------------
             # SAME-CAMERA SPATIAL CONFLICT GATE
-            #
-            # If a candidate is simultaneously visible with
-            # an existing same-camera member and they are
-            # repeatedly spatially separated, this GID is
-            # impossible and is removed from consideration.
             # ------------------------------------------------
 
             if (
@@ -197,7 +213,6 @@ class GlobalIdentityManager:
                 embedding,
             )
 
-
             candidates.append(
                 {
                     "global_id": gid,
@@ -208,28 +223,27 @@ class GlobalIdentityManager:
             )
 
 
-        # Every GID may have been rejected by
-        # compatibility constraints.
+        # Every existing identity may have been rejected
+        # by the compatibility gate.
         if not candidates:
             return None
 
 
-        # ------------------------------------------------
-        # Rank identities by gallery top-k score.
-        # ------------------------------------------------
+        # ----------------------------------------------------
+        # Rank by gallery top-k similarity.
+        # ----------------------------------------------------
 
         candidates.sort(
-            key=lambda x: x["topk"],
+            key=lambda item: item["topk"],
             reverse=True,
         )
-
 
         best = candidates[0]
 
 
-        # ------------------------------------------------
+        # ----------------------------------------------------
         # SECOND-BEST COMPETITOR
-        # ------------------------------------------------
+        # ----------------------------------------------------
 
         if len(candidates) >= 2:
 
@@ -258,11 +272,13 @@ class GlobalIdentityManager:
         return best
 
 
-    # ====================================================
-    # EVALUATE A TRACKLET
+    # ========================================================
+    # EVALUATE TRACKLET
     #
-    # This method DOES NOT modify the identity database.
-    # ====================================================
+    # IMPORTANT:
+    #
+    # This method does NOT modify any GID.
+    # ========================================================
 
     def evaluate(
         self,
@@ -279,18 +295,20 @@ class GlobalIdentityManager:
         )
 
 
-        # ------------------------------------------------
-        # No compatible GID.
-        # ------------------------------------------------
+        # ----------------------------------------------------
+        # No compatible existing identity.
+        # ----------------------------------------------------
 
         if best is None:
 
             return MatchResult(
                 status="NEW",
                 global_id=None,
+
                 max_similarity=-1.0,
                 mean_similarity=-1.0,
                 topk_similarity=-1.0,
+
                 second_global_id=None,
                 second_topk_similarity=None,
                 score_margin=None,
@@ -302,9 +320,9 @@ class GlobalIdentityManager:
         ]
 
 
-        # ------------------------------------------------
-        # SAME-CAMERA OR CROSS-CAMERA?
-        # ------------------------------------------------
+        # ----------------------------------------------------
+        # SAME CAMERA OR CROSS CAMERA?
+        # ----------------------------------------------------
 
         same_camera = (
             camera_id
@@ -333,18 +351,12 @@ class GlobalIdentityManager:
             )
 
 
-        # ------------------------------------------------
-        # CURRENT DECISION RULE
+        # ----------------------------------------------------
+        # CURRENT APPEARANCE DECISION
         #
-        # max:
-        #     strongest gallery member
-        #
-        # topk:
-        #     support from the gallery
-        #
-        # Margin is currently measured but NOT yet used
-        # to automatically accept/reject.
-        # ------------------------------------------------
+        # Margin is measured but not yet used as an
+        # automatic accept/reject rule.
+        # ----------------------------------------------------
 
         if (
             best["max"] >= strong_threshold
@@ -364,9 +376,9 @@ class GlobalIdentityManager:
             status = "NEW"
 
 
-        # ------------------------------------------------
-        # NEW must never point to an existing GID.
-        # ------------------------------------------------
+        # ----------------------------------------------------
+        # NEW must not point to an existing GID.
+        # ----------------------------------------------------
 
         if status == "NEW":
 
@@ -382,33 +394,76 @@ class GlobalIdentityManager:
         return MatchResult(
             status=status,
             global_id=suggested_gid,
+
             max_similarity=best["max"],
             mean_similarity=best["mean"],
             topk_similarity=best["topk"],
+
             second_global_id=best[
                 "second_global_id"
             ],
+
             second_topk_similarity=best[
                 "second_topk"
             ],
+
             score_margin=best[
                 "margin"
             ],
         )
 
 
-    # ====================================================
+    # ========================================================
+    # ADD PENDING TRACKLET
+    # ========================================================
+
+    def add_pending(
+        self,
+        camera_id,
+        local_track_id,
+        start_frame,
+        end_frame,
+        embedding,
+        candidate_tracklet=None,
+    ):
+
+        key = (
+            camera_id,
+            local_track_id,
+        )
+
+        self.pending_tracklets[key] = {
+            "camera_id": camera_id,
+
+            "local_track_id":
+                local_track_id,
+
+            "start_frame":
+                start_frame,
+
+            "end_frame":
+                end_frame,
+
+            "embedding":
+                embedding,
+
+            "candidate_tracklet":
+                candidate_tracklet,
+        }
+
+
+    # ========================================================
     # SAFE OPEN-SET ASSIGNMENT
     #
-    # STRONG:
-    #     merge into existing GID
+    # STRONG
+    #     -> merge into existing GID
     #
-    # PENDING:
-    #     do not modify anything
+    # PENDING
+    #     -> store for later
     #
-    # NEW:
-    #     create a new GID
-    # ====================================================
+    # NEW
+    #     -> create new GID
+    # ========================================================
 
     def assign_tracklet(
         self,
@@ -421,9 +476,9 @@ class GlobalIdentityManager:
         tracklet_lookup=None,
     ):
 
-        # ------------------------------------------------
-        # FIRST PERSON IN THE SYSTEM
-        # ------------------------------------------------
+        # ----------------------------------------------------
+        # FIRST IDENTITY IN SYSTEM
+        # ----------------------------------------------------
 
         if not self.identities:
 
@@ -435,18 +490,18 @@ class GlobalIdentityManager:
                 embedding=embedding,
             )
 
-
             match = MatchResult(
                 status="NEW",
                 global_id=None,
+
                 max_similarity=-1.0,
                 mean_similarity=-1.0,
                 topk_similarity=-1.0,
+
                 second_global_id=None,
                 second_topk_similarity=None,
                 score_margin=None,
             )
-
 
             return AssignmentResult(
                 status="NEW",
@@ -457,9 +512,9 @@ class GlobalIdentityManager:
             )
 
 
-        # ------------------------------------------------
-        # FIND BEST EXISTING IDENTITY
-        # ------------------------------------------------
+        # ----------------------------------------------------
+        # EVALUATE EXISTING IDENTITIES
+        # ----------------------------------------------------
 
         match = self.evaluate(
             camera_id=camera_id,
@@ -469,11 +524,11 @@ class GlobalIdentityManager:
         )
 
 
-        # ------------------------------------------------
-        # STRONG MATCH
+        # ----------------------------------------------------
+        # STRONG
         #
-        # Attach this local tracklet to the existing GID.
-        # ------------------------------------------------
+        # Merge into existing identity.
+        # ----------------------------------------------------
 
         if match.status == "STRONG":
 
@@ -486,7 +541,6 @@ class GlobalIdentityManager:
                 embedding=embedding,
             )
 
-
             return AssignmentResult(
                 status="STRONG",
                 global_id=match.global_id,
@@ -496,18 +550,23 @@ class GlobalIdentityManager:
             )
 
 
-        # ------------------------------------------------
+        # ----------------------------------------------------
         # PENDING
         #
-        # Do NOT:
-        #
-        #   - merge into existing GID
-        #   - create a new GID
-        #
-        # Keep it unresolved for additional evidence.
-        # ------------------------------------------------
+        # Do not contaminate the gallery.
+        # Store for future re-evaluation.
+        # ----------------------------------------------------
 
         if match.status == "PENDING":
+
+            self.add_pending(
+                camera_id=camera_id,
+                local_track_id=local_track_id,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                embedding=embedding,
+                candidate_tracklet=candidate_tracklet,
+            )
 
             return AssignmentResult(
                 status="PENDING",
@@ -518,11 +577,12 @@ class GlobalIdentityManager:
             )
 
 
-        # ------------------------------------------------
-        # NEW PERSON
+        # ----------------------------------------------------
+        # NEW
         #
-        # Existing GIDs are not sufficiently compatible.
-        # ------------------------------------------------
+        # Existing identities are not sufficiently
+        # compatible.
+        # ----------------------------------------------------
 
         gid = self.create_identity(
             camera_id=camera_id,
@@ -531,7 +591,6 @@ class GlobalIdentityManager:
             end_frame=end_frame,
             embedding=embedding,
         )
-
 
         return AssignmentResult(
             status="NEW",
@@ -542,9 +601,187 @@ class GlobalIdentityManager:
         )
 
 
-    # ====================================================
+    # ========================================================
+    # RE-EVALUATE PENDING TRACKLETS
+    # ========================================================
+
+    def reevaluate_pending(
+        self,
+        tracklet_lookup=None,
+    ):
+
+        results = []
+
+        # Copy items because resolved entries will
+        # be deleted from the pending dictionary.
+        pending_items = list(
+            self.pending_tracklets.items()
+        )
+
+
+        for key, pending in pending_items:
+
+            match = self.evaluate(
+                camera_id=pending[
+                    "camera_id"
+                ],
+
+                embedding=pending[
+                    "embedding"
+                ],
+
+                candidate_tracklet=pending[
+                    "candidate_tracklet"
+                ],
+
+                tracklet_lookup=tracklet_lookup,
+            )
+
+
+            # ------------------------------------------------
+            # NOW STRONG
+            #
+            # Additional gallery evidence made the
+            # identity sufficiently convincing.
+            # ------------------------------------------------
+
+            if match.status == "STRONG":
+
+                self.add_to_identity(
+                    global_id=match.global_id,
+
+                    camera_id=pending[
+                        "camera_id"
+                    ],
+
+                    local_track_id=pending[
+                        "local_track_id"
+                    ],
+
+                    start_frame=pending[
+                        "start_frame"
+                    ],
+
+                    end_frame=pending[
+                        "end_frame"
+                    ],
+
+                    embedding=pending[
+                        "embedding"
+                    ],
+                )
+
+                del self.pending_tracklets[
+                    key
+                ]
+
+                results.append(
+                    {
+                        "camera_id":
+                            pending[
+                                "camera_id"
+                            ],
+
+                        "local_track_id":
+                            pending[
+                                "local_track_id"
+                            ],
+
+                        "status":
+                            "STRONG",
+
+                        "global_id":
+                            match.global_id,
+                    }
+                )
+
+
+            # ------------------------------------------------
+            # NOW CLEARLY NEW
+            # ------------------------------------------------
+
+            elif match.status == "NEW":
+
+                gid = self.create_identity(
+                    camera_id=pending[
+                        "camera_id"
+                    ],
+
+                    local_track_id=pending[
+                        "local_track_id"
+                    ],
+
+                    start_frame=pending[
+                        "start_frame"
+                    ],
+
+                    end_frame=pending[
+                        "end_frame"
+                    ],
+
+                    embedding=pending[
+                        "embedding"
+                    ],
+                )
+
+                del self.pending_tracklets[
+                    key
+                ]
+
+                results.append(
+                    {
+                        "camera_id":
+                            pending[
+                                "camera_id"
+                            ],
+
+                        "local_track_id":
+                            pending[
+                                "local_track_id"
+                            ],
+
+                        "status":
+                            "NEW",
+
+                        "global_id":
+                            gid,
+                    }
+                )
+
+
+            # ------------------------------------------------
+            # STILL PENDING
+            # ------------------------------------------------
+
+            else:
+
+                results.append(
+                    {
+                        "camera_id":
+                            pending[
+                                "camera_id"
+                            ],
+
+                        "local_track_id":
+                            pending[
+                                "local_track_id"
+                            ],
+
+                        "status":
+                            "PENDING",
+
+                        "global_id":
+                            match.global_id,
+                    }
+                )
+
+
+        return results
+
+
+    # ========================================================
     # SUMMARY
-    # ====================================================
+    # ========================================================
 
     def summary(self):
 
@@ -561,3 +798,12 @@ class GlobalIdentityManager:
                     gid
                 ].summary()
             )
+
+        print()
+
+        print(
+            "Pending tracklets:",
+            len(
+                self.pending_tracklets
+            ),
+        )
