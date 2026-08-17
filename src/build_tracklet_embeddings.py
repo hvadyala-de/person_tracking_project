@@ -1,4 +1,5 @@
 from pathlib import Path
+import argparse
 import csv
 
 import cv2
@@ -9,18 +10,44 @@ from reid_extractor import ReIDExtractor
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
+
+# ============================================================
+# ARGUMENTS
+# ============================================================
+
+parser = argparse.ArgumentParser(
+    description="Build OSNet embeddings for Terrace tracklets"
+)
+
+parser.add_argument(
+    "--camera",
+    type=int,
+    required=True,
+    choices=[0, 1, 2, 3],
+    help="Terrace camera number",
+)
+
+args = parser.parse_args()
+
+camera_id = args.camera
+
+
+# ============================================================
+# PATHS
+# ============================================================
+
 CROPS_DIR = (
     PROJECT_ROOT
     / "output"
     / "terrace_crops"
-    / "c0"
+    / f"c{camera_id}"
 )
 
 OUTPUT_DIR = (
     PROJECT_ROOT
     / "output"
     / "terrace_embeddings"
-    / "c0"
+    / f"c{camera_id}"
 )
 
 SUMMARY_CSV = (
@@ -28,6 +55,10 @@ SUMMARY_CSV = (
     / "tracklet_embeddings_summary.csv"
 )
 
+
+# ============================================================
+# NORMALIZATION
+# ============================================================
 
 def normalize(vector):
 
@@ -39,9 +70,14 @@ def normalize(vector):
     return vector / norm
 
 
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
 
     if not CROPS_DIR.exists():
+
         raise FileNotFoundError(
             f"Crops directory not found: {CROPS_DIR}"
         )
@@ -51,13 +87,22 @@ def main():
         exist_ok=True,
     )
 
+    # --------------------------------------------------------
+    # LOAD OSNET ONCE
+    # --------------------------------------------------------
+
     extractor = ReIDExtractor()
+
+    # --------------------------------------------------------
+    # FIND TRACKLET DIRECTORIES
+    # --------------------------------------------------------
 
     track_dirs = sorted(
         [
             path
             for path in CROPS_DIR.iterdir()
             if path.is_dir()
+            and path.name.startswith("track_")
         ]
     )
 
@@ -66,6 +111,7 @@ def main():
     print("========================")
     print()
 
+    print(f"Camera:          c{camera_id}")
     print(f"Crop directory: {CROPS_DIR}")
     print(f"Track folders:  {len(track_dirs)}")
     print()
@@ -73,6 +119,11 @@ def main():
     summary_rows = []
 
     total_tracks_saved = 0
+    total_crops_processed = 0
+
+    # ========================================================
+    # BUILD EACH TRACKLET DESCRIPTOR
+    # ========================================================
 
     for track_dir in track_dirs:
 
@@ -80,7 +131,7 @@ def main():
             track_dir.glob("*.jpg")
         )
 
-        if len(crop_paths) == 0:
+        if not crop_paths:
             continue
 
         embeddings = []
@@ -92,6 +143,10 @@ def main():
             )
 
             if image is None:
+                print(
+                    f"Warning: could not read "
+                    f"{crop_path}"
+                )
                 continue
 
             feature = extractor.extract(
@@ -105,8 +160,14 @@ def main():
                 feature
             )
 
-        if len(embeddings) == 0:
+            total_crops_processed += 1
+
+        if not embeddings:
             continue
+
+        # ----------------------------------------------------
+        # MULTI-CROP TRACKLET DESCRIPTOR
+        # ----------------------------------------------------
 
         embeddings = np.stack(
             embeddings,
@@ -120,7 +181,13 @@ def main():
 
         mean_embedding = normalize(
             mean_embedding
-        ).astype(np.float32)
+        ).astype(
+            np.float32
+        )
+
+        # ----------------------------------------------------
+        # SAVE 512-D DESCRIPTOR
+        # ----------------------------------------------------
 
         output_path = (
             OUTPUT_DIR
@@ -134,8 +201,9 @@ def main():
 
         summary_rows.append(
             {
+                "camera_id": f"c{camera_id}",
                 "track_id": track_dir.name,
-                "num_crops": len(crop_paths),
+                "num_crops": len(embeddings),
                 "feature_dim": mean_embedding.shape[0],
                 "output_path": str(output_path),
             }
@@ -144,16 +212,27 @@ def main():
         total_tracks_saved += 1
 
         if total_tracks_saved % 20 == 0:
+
             print(
                 f"Saved embeddings for "
-                f"{total_tracks_saved} tracklets"
+                f"{total_tracks_saved}/"
+                f"{len(track_dirs)} tracklets"
             )
 
-    with open(SUMMARY_CSV, "w", newline="") as f:
+    # ========================================================
+    # SAVE SUMMARY
+    # ========================================================
+
+    with open(
+        SUMMARY_CSV,
+        "w",
+        newline="",
+    ) as f:
 
         writer = csv.DictWriter(
             f,
             fieldnames=[
+                "camera_id",
                 "track_id",
                 "num_crops",
                 "feature_dim",
@@ -163,8 +242,13 @@ def main():
 
         writer.writeheader()
 
-        for row in summary_rows:
-            writer.writerow(row)
+        writer.writerows(
+            summary_rows
+        )
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
 
     print()
     print("Embedding build completed")
@@ -172,10 +256,29 @@ def main():
     print()
 
     print(
-        f"Tracklet embeddings saved: "
-        f"{total_tracks_saved}"
+        f"Camera:                   c{camera_id}"
     )
 
+    print(
+        f"Tracklets processed:      "
+        f"{len(track_dirs)}"
+    )
+
+    print(
+        f"Tracklet embeddings saved:"
+        f" {total_tracks_saved}"
+    )
+
+    print(
+        f"Person crops processed:   "
+        f"{total_crops_processed}"
+    )
+
+    print(
+        f"Feature dimension:        512"
+    )
+
+    print()
     print(
         f"Output directory: {OUTPUT_DIR}"
     )
