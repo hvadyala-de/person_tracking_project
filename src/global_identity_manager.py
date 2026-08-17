@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
 
-import numpy as np
-
 try:
     from .global_identity import GlobalIdentity
 except ImportError:
@@ -17,6 +15,10 @@ class MatchResult:
     max_similarity: float
     mean_similarity: float
     topk_similarity: float
+
+    second_global_id: Optional[int]
+    second_topk_similarity: Optional[float]
+    score_margin: Optional[float]
 
 
 class GlobalIdentityManager:
@@ -130,7 +132,7 @@ class GlobalIdentityManager:
 
 
     # ====================================================
-    # FIND BEST EXISTING GID
+    # FIND BEST AND SECOND-BEST GID
     # ====================================================
 
     def find_best_identity(
@@ -151,28 +153,46 @@ class GlobalIdentityManager:
             )
 
             candidates.append(
-                (
-                    scores["topk"],
-                    scores["max"],
-                    scores["mean"],
-                    gid,
-                )
+                {
+                    "global_id": gid,
+                    "topk": scores["topk"],
+                    "max": scores["max"],
+                    "mean": scores["mean"],
+                }
             )
 
+        # Rank identities using gallery top-k similarity.
         candidates.sort(
-            reverse=True
+            key=lambda x: x["topk"],
+            reverse=True,
         )
 
-        topk_score, max_score, mean_score, gid = (
-            candidates[0]
-        )
+        best = candidates[0]
 
-        return {
-            "global_id": gid,
-            "topk": topk_score,
-            "max": max_score,
-            "mean": mean_score,
-        }
+        if len(candidates) >= 2:
+
+            second = candidates[1]
+
+            best["second_global_id"] = (
+                second["global_id"]
+            )
+
+            best["second_topk"] = (
+                second["topk"]
+            )
+
+            best["margin"] = (
+                best["topk"]
+                - second["topk"]
+            )
+
+        else:
+
+            best["second_global_id"] = None
+            best["second_topk"] = None
+            best["margin"] = None
+
+        return best
 
 
     # ====================================================
@@ -189,7 +209,7 @@ class GlobalIdentityManager:
             embedding
         )
 
-        # No existing identities yet.
+        # No existing identities.
         if best is None:
 
             return MatchResult(
@@ -198,6 +218,9 @@ class GlobalIdentityManager:
                 max_similarity=-1.0,
                 mean_similarity=-1.0,
                 topk_similarity=-1.0,
+                second_global_id=None,
+                second_topk_similarity=None,
+                score_margin=None,
             )
 
 
@@ -207,8 +230,8 @@ class GlobalIdentityManager:
 
 
         # ------------------------------------------------
-        # Determine whether this is same-camera or
-        # cross-camera matching.
+        # Determine whether matching against this GID is
+        # same-camera or cross-camera.
         # ------------------------------------------------
 
         same_camera = (
@@ -239,13 +262,13 @@ class GlobalIdentityManager:
 
 
         # ------------------------------------------------
-        # Decision logic
+        # Current decision logic.
         #
-        # max:
-        #     strongest individual gallery match
+        # NOTE:
+        # We are measuring score_margin now, but we are
+        # NOT using it for the decision yet.
         #
-        # topk:
-        #     support from multiple gallery embeddings
+        # We first want to observe real Terrace margins.
         # ------------------------------------------------
 
         if (
@@ -266,13 +289,7 @@ class GlobalIdentityManager:
             status = "NEW"
 
 
-        # ------------------------------------------------
-        # IMPORTANT:
-        #
-        # If this is classified as NEW, do not return an
-        # existing GID as a recommendation.
-        # ------------------------------------------------
-
+        # NEW means no existing GID should be suggested.
         if status == "NEW":
 
             suggested_gid = None
@@ -290,6 +307,15 @@ class GlobalIdentityManager:
             max_similarity=best["max"],
             mean_similarity=best["mean"],
             topk_similarity=best["topk"],
+            second_global_id=best[
+                "second_global_id"
+            ],
+            second_topk_similarity=best[
+                "second_topk"
+            ],
+            score_margin=best[
+                "margin"
+            ],
         )
 
 
