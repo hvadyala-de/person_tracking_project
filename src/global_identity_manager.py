@@ -3,8 +3,10 @@ from typing import Optional
 
 try:
     from .global_identity import GlobalIdentity
+    from .identity_compatibility import identity_has_conflict
 except ImportError:
     from global_identity import GlobalIdentity
+    from identity_compatibility import identity_has_conflict
 
 
 @dataclass
@@ -138,6 +140,8 @@ class GlobalIdentityManager:
     def find_best_identity(
         self,
         embedding,
+        candidate_tracklet=None,
+        tracklet_lookup=None,
     ):
 
         if not self.identities:
@@ -146,6 +150,40 @@ class GlobalIdentityManager:
         candidates = []
 
         for gid, identity in self.identities.items():
+
+            # ------------------------------------------------
+            # SAME-CAMERA SPATIOTEMPORAL CONFLICT GATE
+            #
+            # If the candidate and an existing member of this
+            # GID are visible at the same time in the same
+            # camera AND are repeatedly far apart, they cannot
+            # represent the same person.
+            #
+            # In that case this GID is completely removed from
+            # consideration.
+            #
+            # This remains optional so embedding-only tests
+            # continue to work.
+            # ------------------------------------------------
+
+            if (
+                candidate_tracklet is not None
+                and tracklet_lookup is not None
+            ):
+
+                conflict = identity_has_conflict(
+                    candidate_tracklet,
+                    identity,
+                    tracklet_lookup,
+                )
+
+                if conflict:
+                    continue
+
+
+            # ------------------------------------------------
+            # Appearance/gallery score
+            # ------------------------------------------------
 
             scores = self.score_identity(
                 identity,
@@ -161,13 +199,31 @@ class GlobalIdentityManager:
                 }
             )
 
-        # Rank identities using gallery top-k similarity.
+
+        # ------------------------------------------------
+        # All existing identities may have been rejected
+        # by the compatibility gate.
+        # ------------------------------------------------
+
+        if not candidates:
+            return None
+
+
+        # ------------------------------------------------
+        # Rank by gallery top-k similarity
+        # ------------------------------------------------
+
         candidates.sort(
             key=lambda x: x["topk"],
             reverse=True,
         )
 
         best = candidates[0]
+
+
+        # ------------------------------------------------
+        # Find second-best competitor and margin
+        # ------------------------------------------------
 
         if len(candidates) >= 2:
 
@@ -192,6 +248,7 @@ class GlobalIdentityManager:
             best["second_topk"] = None
             best["margin"] = None
 
+
         return best
 
 
@@ -203,13 +260,26 @@ class GlobalIdentityManager:
         self,
         camera_id,
         embedding,
+        candidate_tracklet=None,
+        tracklet_lookup=None,
     ):
 
         best = self.find_best_identity(
-            embedding
+            embedding,
+            candidate_tracklet=candidate_tracklet,
+            tracklet_lookup=tracklet_lookup,
         )
 
-        # No existing identities.
+
+        # ------------------------------------------------
+        # No compatible existing GID.
+        #
+        # This can mean:
+        #
+        # 1. no GIDs exist yet
+        # 2. every GID was rejected by spatial conflict
+        # ------------------------------------------------
+
         if best is None:
 
             return MatchResult(
@@ -230,8 +300,7 @@ class GlobalIdentityManager:
 
 
         # ------------------------------------------------
-        # Determine whether matching against this GID is
-        # same-camera or cross-camera.
+        # SAME CAMERA OR CROSS CAMERA?
         # ------------------------------------------------
 
         same_camera = (
@@ -262,13 +331,16 @@ class GlobalIdentityManager:
 
 
         # ------------------------------------------------
-        # Current decision logic.
+        # CURRENT DECISION LOGIC
         #
-        # NOTE:
-        # We are measuring score_margin now, but we are
-        # NOT using it for the decision yet.
+        # We calculate score_margin, but we still do NOT
+        # use margin to automatically accept/reject yet.
         #
-        # We first want to observe real Terrace margins.
+        # max:
+        #     strongest member-to-query similarity
+        #
+        # topk:
+        #     support from the identity gallery
         # ------------------------------------------------
 
         if (
@@ -289,7 +361,10 @@ class GlobalIdentityManager:
             status = "NEW"
 
 
-        # NEW means no existing GID should be suggested.
+        # ------------------------------------------------
+        # NEW must never suggest an existing GID.
+        # ------------------------------------------------
+
         if status == "NEW":
 
             suggested_gid = None
