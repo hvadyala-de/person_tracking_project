@@ -23,6 +23,17 @@ class MatchResult:
     score_margin: Optional[float]
 
 
+@dataclass
+class AssignmentResult:
+    status: str
+    global_id: Optional[int]
+
+    created_new: bool
+    merged: bool
+
+    match: MatchResult
+
+
 class GlobalIdentityManager:
 
     def __init__(self):
@@ -32,7 +43,9 @@ class GlobalIdentityManager:
         self.next_global_id = 1
 
         # ------------------------------------------------
-        # Temporary thresholds learned from Terrace C0/C1
+        # TEMPORARY TERRACE THRESHOLDS
+        #
+        # These are not final production thresholds.
         # ------------------------------------------------
 
         self.same_camera_strong = 0.92
@@ -77,7 +90,7 @@ class GlobalIdentityManager:
 
 
     # ====================================================
-    # ADD TRACK TO EXISTING GID
+    # ADD TRACKLET TO EXISTING GID
     # ====================================================
 
     def add_to_identity(
@@ -149,21 +162,16 @@ class GlobalIdentityManager:
 
         candidates = []
 
+
         for gid, identity in self.identities.items():
 
             # ------------------------------------------------
-            # SAME-CAMERA SPATIOTEMPORAL CONFLICT GATE
+            # SAME-CAMERA SPATIAL CONFLICT GATE
             #
-            # If the candidate and an existing member of this
-            # GID are visible at the same time in the same
-            # camera AND are repeatedly far apart, they cannot
-            # represent the same person.
-            #
-            # In that case this GID is completely removed from
-            # consideration.
-            #
-            # This remains optional so embedding-only tests
-            # continue to work.
+            # If a candidate is simultaneously visible with
+            # an existing same-camera member and they are
+            # repeatedly spatially separated, this GID is
+            # impossible and is removed from consideration.
             # ------------------------------------------------
 
             if (
@@ -171,24 +179,24 @@ class GlobalIdentityManager:
                 and tracklet_lookup is not None
             ):
 
-                conflict = identity_has_conflict(
+                if identity_has_conflict(
                     candidate_tracklet,
                     identity,
                     tracklet_lookup,
-                )
+                ):
 
-                if conflict:
                     continue
 
 
             # ------------------------------------------------
-            # Appearance/gallery score
+            # APPEARANCE / GALLERY SCORE
             # ------------------------------------------------
 
             scores = self.score_identity(
                 identity,
                 embedding,
             )
+
 
             candidates.append(
                 {
@@ -200,17 +208,14 @@ class GlobalIdentityManager:
             )
 
 
-        # ------------------------------------------------
-        # All existing identities may have been rejected
-        # by the compatibility gate.
-        # ------------------------------------------------
-
+        # Every GID may have been rejected by
+        # compatibility constraints.
         if not candidates:
             return None
 
 
         # ------------------------------------------------
-        # Rank by gallery top-k similarity
+        # Rank identities by gallery top-k score.
         # ------------------------------------------------
 
         candidates.sort(
@@ -218,11 +223,12 @@ class GlobalIdentityManager:
             reverse=True,
         )
 
+
         best = candidates[0]
 
 
         # ------------------------------------------------
-        # Find second-best competitor and margin
+        # SECOND-BEST COMPETITOR
         # ------------------------------------------------
 
         if len(candidates) >= 2:
@@ -253,7 +259,9 @@ class GlobalIdentityManager:
 
 
     # ====================================================
-    # EVALUATE NEW TRACKLET
+    # EVALUATE A TRACKLET
+    #
+    # This method DOES NOT modify the identity database.
     # ====================================================
 
     def evaluate(
@@ -272,12 +280,7 @@ class GlobalIdentityManager:
 
 
         # ------------------------------------------------
-        # No compatible existing GID.
-        #
-        # This can mean:
-        #
-        # 1. no GIDs exist yet
-        # 2. every GID was rejected by spatial conflict
+        # No compatible GID.
         # ------------------------------------------------
 
         if best is None:
@@ -300,7 +303,7 @@ class GlobalIdentityManager:
 
 
         # ------------------------------------------------
-        # SAME CAMERA OR CROSS CAMERA?
+        # SAME-CAMERA OR CROSS-CAMERA?
         # ------------------------------------------------
 
         same_camera = (
@@ -331,16 +334,16 @@ class GlobalIdentityManager:
 
 
         # ------------------------------------------------
-        # CURRENT DECISION LOGIC
-        #
-        # We calculate score_margin, but we still do NOT
-        # use margin to automatically accept/reject yet.
+        # CURRENT DECISION RULE
         #
         # max:
-        #     strongest member-to-query similarity
+        #     strongest gallery member
         #
         # topk:
-        #     support from the identity gallery
+        #     support from the gallery
+        #
+        # Margin is currently measured but NOT yet used
+        # to automatically accept/reject.
         # ------------------------------------------------
 
         if (
@@ -362,7 +365,7 @@ class GlobalIdentityManager:
 
 
         # ------------------------------------------------
-        # NEW must never suggest an existing GID.
+        # NEW must never point to an existing GID.
         # ------------------------------------------------
 
         if status == "NEW":
@@ -391,6 +394,151 @@ class GlobalIdentityManager:
             score_margin=best[
                 "margin"
             ],
+        )
+
+
+    # ====================================================
+    # SAFE OPEN-SET ASSIGNMENT
+    #
+    # STRONG:
+    #     merge into existing GID
+    #
+    # PENDING:
+    #     do not modify anything
+    #
+    # NEW:
+    #     create a new GID
+    # ====================================================
+
+    def assign_tracklet(
+        self,
+        camera_id,
+        local_track_id,
+        start_frame,
+        end_frame,
+        embedding,
+        candidate_tracklet=None,
+        tracklet_lookup=None,
+    ):
+
+        # ------------------------------------------------
+        # FIRST PERSON IN THE SYSTEM
+        # ------------------------------------------------
+
+        if not self.identities:
+
+            gid = self.create_identity(
+                camera_id=camera_id,
+                local_track_id=local_track_id,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                embedding=embedding,
+            )
+
+
+            match = MatchResult(
+                status="NEW",
+                global_id=None,
+                max_similarity=-1.0,
+                mean_similarity=-1.0,
+                topk_similarity=-1.0,
+                second_global_id=None,
+                second_topk_similarity=None,
+                score_margin=None,
+            )
+
+
+            return AssignmentResult(
+                status="NEW",
+                global_id=gid,
+                created_new=True,
+                merged=False,
+                match=match,
+            )
+
+
+        # ------------------------------------------------
+        # FIND BEST EXISTING IDENTITY
+        # ------------------------------------------------
+
+        match = self.evaluate(
+            camera_id=camera_id,
+            embedding=embedding,
+            candidate_tracklet=candidate_tracklet,
+            tracklet_lookup=tracklet_lookup,
+        )
+
+
+        # ------------------------------------------------
+        # STRONG MATCH
+        #
+        # Attach this local tracklet to the existing GID.
+        # ------------------------------------------------
+
+        if match.status == "STRONG":
+
+            self.add_to_identity(
+                global_id=match.global_id,
+                camera_id=camera_id,
+                local_track_id=local_track_id,
+                start_frame=start_frame,
+                end_frame=end_frame,
+                embedding=embedding,
+            )
+
+
+            return AssignmentResult(
+                status="STRONG",
+                global_id=match.global_id,
+                created_new=False,
+                merged=True,
+                match=match,
+            )
+
+
+        # ------------------------------------------------
+        # PENDING
+        #
+        # Do NOT:
+        #
+        #   - merge into existing GID
+        #   - create a new GID
+        #
+        # Keep it unresolved for additional evidence.
+        # ------------------------------------------------
+
+        if match.status == "PENDING":
+
+            return AssignmentResult(
+                status="PENDING",
+                global_id=match.global_id,
+                created_new=False,
+                merged=False,
+                match=match,
+            )
+
+
+        # ------------------------------------------------
+        # NEW PERSON
+        #
+        # Existing GIDs are not sufficiently compatible.
+        # ------------------------------------------------
+
+        gid = self.create_identity(
+            camera_id=camera_id,
+            local_track_id=local_track_id,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            embedding=embedding,
+        )
+
+
+        return AssignmentResult(
+            status="NEW",
+            global_id=gid,
+            created_new=True,
+            merged=False,
+            match=match,
         )
 
 
