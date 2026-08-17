@@ -1,5 +1,5 @@
 from pathlib import Path
-from collections import defaultdict
+import argparse
 import csv
 
 from tracklet import Detection, Tracklet
@@ -7,11 +7,10 @@ from tracklet import Detection, Tracklet
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-TRACK_CSV = (
+TRACK_OUTPUT_DIR = (
     PROJECT_ROOT
     / "output"
     / "terrace_bytetrack_tuned"
-    / "tracks_c0.csv"
 )
 
 
@@ -26,7 +25,9 @@ def load_tracklets(csv_path: Path):
         for row in reader:
 
             camera_id = row["camera_id"]
-            local_track_id = int(row["local_track_id"])
+            local_track_id = int(
+                row["local_track_id"]
+            )
 
             key = (
                 camera_id,
@@ -63,14 +64,61 @@ def load_tracklets(csv_path: Path):
 
 def main():
 
-    if not TRACK_CSV.exists():
+    parser = argparse.ArgumentParser(
+        description="Build Terrace tracklets from ByteTrack CSV"
+    )
+
+    parser.add_argument(
+        "--camera",
+        type=int,
+        required=True,
+        choices=[0, 1, 2, 3],
+        help="Terrace camera number",
+    )
+
+    parser.add_argument(
+        "--min-detections",
+        type=int,
+        default=25,
+        help="Minimum detections for a useful tracklet",
+    )
+
+    args = parser.parse_args()
+
+    camera_id = args.camera
+
+    track_csv = (
+        TRACK_OUTPUT_DIR
+        / f"tracks_c{camera_id}.csv"
+    )
+
+    if not track_csv.exists():
 
         raise FileNotFoundError(
-            f"CSV not found: {TRACK_CSV}"
+            f"CSV not found: {track_csv}"
         )
 
     tracklets = load_tracklets(
-        TRACK_CSV
+        track_csv
+    )
+
+    useful_tracklets = [
+        tracklet
+        for tracklet in tracklets.values()
+        if tracklet.num_detections
+        >= args.min_detections
+    ]
+
+    short_tracklets = [
+        tracklet
+        for tracklet in tracklets.values()
+        if tracklet.num_detections
+        < args.min_detections
+    ]
+
+    useful_tracklets.sort(
+        key=lambda t: t.num_detections,
+        reverse=True,
     )
 
     print()
@@ -79,44 +127,30 @@ def main():
     print()
 
     print(
-        f"Input CSV: {TRACK_CSV}"
+        f"Camera: c{camera_id}"
+    )
+
+    print(
+        f"Input CSV: {track_csv}"
     )
 
     print(
         f"Total tracklets: {len(tracklets)}"
     )
 
-    print()
-
-    useful_tracklets = [
-        tracklet
-        for tracklet in tracklets.values()
-        if tracklet.num_detections >= 25
-    ]
-
-    short_tracklets = [
-        tracklet
-        for tracklet in tracklets.values()
-        if tracklet.num_detections < 25
-    ]
-
     print(
-        f"Useful tracklets >=25 detections: "
+        f"Useful tracklets >="
+        f"{args.min_detections} detections: "
         f"{len(useful_tracklets)}"
     )
 
     print(
-        f"Short tracklets <25 detections: "
+        f"Short tracklets <"
+        f"{args.min_detections} detections: "
         f"{len(short_tracklets)}"
     )
 
     print()
-
-    useful_tracklets.sort(
-        key=lambda t: t.num_detections,
-        reverse=True,
-    )
-
     print("Top 20 tracklets")
     print("----------------")
 
