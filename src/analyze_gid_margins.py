@@ -7,25 +7,59 @@ from src.global_identity_manager import (
 )
 
 
-# ------------------------------------------------------------
-# Camera-0 seeds for our currently verified GIDs
-# ------------------------------------------------------------
+# ============================================================
+# VERIFIED GLOBAL IDENTITIES
+#
+# Each dictionary becomes one GID.
+# ============================================================
 
-C0_GID_SEEDS = [
-    112,
-    651,
-    399,
-    701,
-    707,
-    492,
-    209,
-    1,
+KNOWN_IDENTITIES = [
+    {
+        "c0": [112],
+        "c1": [41],
+    },
+    {
+        "c0": [651],
+        "c1": [560, 423],
+    },
+    {
+        "c0": [399],
+        "c1": [503, 382, 319],
+    },
+    {
+        "c0": [701, 740],
+        "c1": [639],
+    },
+    {
+        "c0": [707, 746],
+        "c1": [536],
+    },
+    {
+        "c0": [492],
+        "c1": [511],
+    },
+    {
+        "c0": [209],
+        "c1": [227],
+    },
+    {
+        "c0": [1],
+        "c1": [1, 66],
+    },
 ]
 
 
 EMBEDDING_DIR = Path(
     "output/terrace_embeddings/c1"
 )
+
+
+# We still inspect appearance candidates down to 0.84.
+#
+# This is an ANALYSIS threshold only.
+# It is NOT an automatic matching threshold.
+
+ANALYSIS_MIN_SCORE = 0.84
 
 
 def load_embedding(
@@ -40,39 +74,98 @@ def load_embedding(
     )
 
 
+def add_member(
+    manager,
+    gid,
+    camera_id,
+    track_id,
+):
+
+    manager.add_to_identity(
+        global_id=gid,
+        camera_id=camera_id,
+        local_track_id=track_id,
+        start_frame=0,
+        end_frame=0,
+        embedding=load_embedding(
+            camera_id,
+            track_id,
+        ),
+    )
+
+
 def main():
 
     manager = GlobalIdentityManager()
 
-    # --------------------------------------------------------
-    # Build our 8 known GIDs using Camera 0.
-    # --------------------------------------------------------
+    known_c1_tracks = set()
 
     print()
-    print("CREATING KNOWN GIDS")
-    print("===================")
+    print("BUILDING VERIFIED GID GALLERY")
+    print("=============================")
 
-    for c0_id in C0_GID_SEEDS:
+    # ========================================================
+    # Build each verified GID.
+    # ========================================================
+
+    for identity_data in KNOWN_IDENTITIES:
+
+        c0_tracks = identity_data[
+            "c0"
+        ]
+
+        c1_tracks = identity_data[
+            "c1"
+        ]
+
+        # First C0 fragment creates the GID.
+        first_c0 = c0_tracks[0]
 
         gid = manager.create_identity(
             camera_id=0,
-            local_track_id=c0_id,
+            local_track_id=first_c0,
             start_frame=0,
             end_frame=0,
             embedding=load_embedding(
                 0,
-                c0_id,
+                first_c0,
             ),
         )
 
+        # Add remaining C0 fragments.
+        for track_id in c0_tracks[1:]:
+
+            add_member(
+                manager,
+                gid,
+                0,
+                track_id,
+            )
+
+        # Add verified C1 fragments.
+        for track_id in c1_tracks:
+
+            add_member(
+                manager,
+                gid,
+                1,
+                track_id,
+            )
+
+            known_c1_tracks.add(
+                track_id
+            )
+
         print(
-            f"GID_{gid:04d} <- c0:{c0_id}"
+            manager.identities[
+                gid
+            ].summary()
         )
 
 
-    # --------------------------------------------------------
-    # Evaluate every available Camera-1 embedding.
-    # --------------------------------------------------------
+    # ========================================================
+    # Evaluate unknown C1 tracklets.
+    # ========================================================
 
     rows = []
 
@@ -82,18 +175,25 @@ def main():
         )
     )
 
+    skipped_known = 0
+
     for path in files:
 
         c1_id = int(
             path.stem.split("_")[1]
         )
 
+        # Do not test a track that is already
+        # part of our verified gallery.
+        if c1_id in known_c1_tracks:
+
+            skipped_known += 1
+            continue
+
         embedding = np.load(
             path
         )
 
-        # Raw ranking gives us best + second-best
-        # even if evaluate() later classifies it as NEW.
         best = manager.find_best_identity(
             embedding
         )
@@ -101,18 +201,17 @@ def main():
         if best is None:
             continue
 
+        # Ignore obviously weak appearance candidates.
+        if (
+            best["topk"]
+            < ANALYSIS_MIN_SCORE
+        ):
+            continue
+
         result = manager.evaluate(
             camera_id=1,
             embedding=embedding,
         )
-
-        # We only care about appearance-plausible
-        # candidates. Ignore very weak matches.
-        if (
-            best["topk"]
-            < manager.cross_camera_pending
-        ):
-            continue
 
         rows.append(
             {
@@ -124,6 +223,10 @@ def main():
 
                 "best_score": best[
                     "topk"
+                ],
+
+                "best_max": best[
+                    "max"
                 ],
 
                 "second_gid": best[
@@ -143,9 +246,9 @@ def main():
         )
 
 
-    # --------------------------------------------------------
-    # Smallest margin = hardest competition.
-    # --------------------------------------------------------
+    # ========================================================
+    # Hardest competition first.
+    # ========================================================
 
     rows.sort(
         key=lambda row: row[
@@ -155,18 +258,23 @@ def main():
 
 
     print()
-    print("HARDEST GID COMPETITION CASES")
-    print("=============================")
+    print("HARD CASES WITH RICHER GALLERY")
+    print("==============================")
 
     print()
     print(
-        f"Camera-1 embeddings: "
+        f"Total Camera-1 embeddings: "
         f"{len(files)}"
     )
 
     print(
-        f"Candidates with best score >= "
-        f"{manager.cross_camera_pending:.2f}: "
+        f"Known C1 tracks skipped: "
+        f"{skipped_known}"
+    )
+
+    print(
+        f"Unknown candidates >= "
+        f"{ANALYSIS_MIN_SCORE:.2f}: "
         f"{len(rows)}"
     )
 
@@ -175,14 +283,15 @@ def main():
     print(
         f"{'C1 ID':>7} "
         f"{'Best GID':>9} "
-        f"{'Best':>7} "
+        f"{'TopK':>7} "
+        f"{'Max':>7} "
         f"{'2nd GID':>9} "
         f"{'Second':>7} "
         f"{'Margin':>8} "
         f"{'Status':>8}"
     )
 
-    print("-" * 70)
+    print("-" * 80)
 
 
     for row in rows[:30]:
@@ -191,6 +300,7 @@ def main():
             f"{row['c1_id']:>7} "
             f"{row['best_gid']:>9} "
             f"{row['best_score']:>7.4f} "
+            f"{row['best_max']:>7.4f} "
             f"{row['second_gid']:>9} "
             f"{row['second_score']:>7.4f} "
             f"{row['margin']:>8.4f} "
