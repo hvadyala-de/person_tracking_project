@@ -1,23 +1,39 @@
 from pathlib import Path
 from collections import defaultdict
+import argparse
 import csv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
-TRACK_CSV = (
-    PROJECT_ROOT
-    / "output"
-    / "terrace_baseline"
-    / "tracks_c0.csv"
+
+parser = argparse.ArgumentParser(
+    description="Analyze ByteTrack local track fragmentation"
 )
+
+parser.add_argument(
+    "--input",
+    required=True,
+    help="Path to tracks CSV, relative to project root",
+)
+
+args = parser.parse_args()
+
+
+TRACK_CSV = PROJECT_ROOT / args.input
+
+
+if not TRACK_CSV.exists():
+    raise FileNotFoundError(
+        f"Track CSV not found: {TRACK_CSV}"
+    )
 
 
 tracks = defaultdict(list)
 
 
 # ============================================================
-# READ BYTE TRACK OUTPUT
+# READ TRACK OUTPUT
 # ============================================================
 
 with open(TRACK_CSV, "r", newline="") as f:
@@ -50,11 +66,17 @@ with open(TRACK_CSV, "r", newline="") as f:
 
 summaries = []
 
+
 for (camera_id, track_id), detections in tracks.items():
 
-    detections.sort(key=lambda x: x["frame"])
+    detections.sort(
+        key=lambda x: x["frame"]
+    )
 
-    frames = [d["frame"] for d in detections]
+    frames = [
+        d["frame"]
+        for d in detections
+    ]
 
     start_frame = frames[0]
     end_frame = frames[-1]
@@ -64,18 +86,31 @@ for (camera_id, track_id), detections in tracks.items():
 
     num_detections = len(detections)
 
-    mean_confidence = sum(
-        d["confidence"] for d in detections
-    ) / num_detections
+    mean_confidence = (
+        sum(
+            d["confidence"]
+            for d in detections
+        )
+        / num_detections
+    )
 
     gaps = [
         frames[i] - frames[i - 1]
-        for i in range(1, len(frames))
+        for i in range(
+            1,
+            len(frames),
+        )
     ]
 
-    max_gap = max(gaps) if gaps else 0
+    max_gap = (
+        max(gaps)
+        if gaps
+        else 0
+    )
 
-    duration_seconds = end_time - start_time
+    duration_seconds = (
+        end_time - start_time
+    )
 
     summaries.append(
         {
@@ -91,7 +126,6 @@ for (camera_id, track_id), detections in tracks.items():
     )
 
 
-# Longest tracks first
 summaries.sort(
     key=lambda x: x["detections"],
     reverse=True,
@@ -102,33 +136,56 @@ summaries.sort(
 # GLOBAL STATISTICS
 # ============================================================
 
+short_tracks = [
+    t
+    for t in summaries
+    if t["detections"] < 25
+]
+
+medium_tracks = [
+    t
+    for t in summaries
+    if 25 <= t["detections"] < 100
+]
+
+long_tracks = [
+    t
+    for t in summaries
+    if t["detections"] >= 100
+]
+
+
 print()
 print("BYTE TRACK ANALYSIS")
 print("===================")
 print()
 
 print(f"CSV: {TRACK_CSV}")
-print(f"Total local IDs: {len(summaries)}")
+print()
 
-short_tracks = [
-    t for t in summaries
-    if t["detections"] < 25
-]
+print(
+    f"Total local IDs:          {len(summaries)}"
+)
 
-long_tracks = [
-    t for t in summaries
-    if t["detections"] >= 100
-]
+print(
+    f"Tracks < 25 detections:   {len(short_tracks)}"
+)
 
-print(f"Tracks < 25 detections:  {len(short_tracks)}")
-print(f"Tracks >= 100 detections: {len(long_tracks)}")
+print(
+    f"Tracks 25-99 detections:  {len(medium_tracks)}"
+)
+
+print(
+    f"Tracks >=100 detections:  {len(long_tracks)}"
+)
 
 print()
+
 print("Longest tracks")
 print("--------------")
 
 print(
-    f"{'ID':>5} "
+    f"{'ID':>6} "
     f"{'Start':>7} "
     f"{'End':>7} "
     f"{'Detections':>11} "
@@ -140,7 +197,7 @@ print(
 for track in summaries[:30]:
 
     print(
-        f"{track['track_id']:>5} "
+        f"{track['track_id']:>6} "
         f"{track['start_frame']:>7} "
         f"{track['end_frame']:>7} "
         f"{track['detections']:>11} "
