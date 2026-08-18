@@ -166,13 +166,6 @@ def load_all_tracklets():
             )
 
 
-            # ------------------------------------------------
-            # Normalized lookup:
-            #
-            # (0, track_id)
-            # (1, track_id)
-            # ------------------------------------------------
-
             tracklet_lookup[
                 (
                     normalized_camera,
@@ -180,13 +173,6 @@ def load_all_tracklets():
                 )
             ] = tracklet
 
-
-            # ------------------------------------------------
-            # Also keep string lookup for compatibility:
-            #
-            # ("c0", track_id)
-            # ("c1", track_id)
-            # ------------------------------------------------
 
             tracklet_lookup[
                 (
@@ -261,10 +247,6 @@ def main():
     ) = load_all_tracklets()
 
 
-    # --------------------------------------------------------
-    # Process tracklets in chronological order.
-    # --------------------------------------------------------
-
     tracklets.sort(
         key=lambda item: (
             item[0].start_frame,
@@ -307,7 +289,7 @@ def main():
 
 
     # ========================================================
-    # CREATE GID MANAGER WITH GEOMETRY ENABLED
+    # CREATE MANAGER
     # ========================================================
 
     manager = GlobalIdentityManager(
@@ -326,7 +308,12 @@ def main():
 
 
     # ========================================================
-    # PROCESS ALL TRACKLETS
+    # CHRONOLOGICAL PROCESSING
+    #
+    # Same-camera continuation is deliberately disabled here.
+    #
+    # During chronological construction we only allow the
+    # validated cross-camera CORE-supported pending sweep.
     # ========================================================
 
     for tracklet, embedding in tracklets:
@@ -396,8 +383,10 @@ def main():
 
 
         # ----------------------------------------------------
-        # Whenever the gallery changes, give unresolved
-        # tracklets another chance.
+        # Gallery changed.
+        #
+        # IMPORTANT:
+        # Same-camera continuation remains disabled here.
         # ----------------------------------------------------
 
         if (
@@ -407,12 +396,15 @@ def main():
 
             manager.reevaluate_pending(
                 tracklet_lookup=
-                    tracklet_lookup
+                    tracklet_lookup,
+
+                include_same_camera=
+                    False,
             )
 
 
         # ----------------------------------------------------
-        # Progress report
+        # Progress
         # ----------------------------------------------------
 
         if (
@@ -432,13 +424,121 @@ def main():
 
 
     # ========================================================
-    # FINAL PENDING PASS
+    # PRE-FINAL BASELINE
+    #
+    # Expected validated state:
+    #
+    # GIDs    = 76
+    # pending = 96
     # ========================================================
 
-    manager.reevaluate_pending(
-        tracklet_lookup=
-            tracklet_lookup
+    pre_final_gids = len(
+        manager.identities
     )
+
+
+    pre_final_pending = len(
+        manager.pending_tracklets
+    )
+
+
+    print()
+    print(
+        "PRE-FINAL CONTINUATION STATE"
+    )
+
+    print(
+        "============================"
+    )
+
+
+    print(
+        "GIDs:",
+        pre_final_gids,
+    )
+
+
+    print(
+        "Pending:",
+        pre_final_pending,
+    )
+
+
+    # ========================================================
+    # FINAL PENDING PASS
+    #
+    # This is the ONLY place where same-camera continuation
+    # is enabled.
+    #
+    # Order inside manager:
+    #
+    #   1. cross-camera CORE-supported pending sweep
+    #   2. one same-camera CORE continuation pass
+    #   3. stop -- no extra cross-camera cascade afterward
+    # ========================================================
+
+    final_pending_results = (
+        manager.reevaluate_pending(
+            tracklet_lookup=
+                tracklet_lookup,
+
+            include_same_camera=
+                True,
+        )
+    )
+
+
+    same_camera_results = [
+        result
+
+        for result
+        in final_pending_results
+
+        if result.get(
+            "reason"
+        )
+        == "SAME_CAMERA_CORE_CONTINUATION"
+    ]
+
+
+    print()
+    print(
+        "FINAL SAME-CAMERA CONTINUATIONS"
+    )
+
+    print(
+        "==============================="
+    )
+
+
+    if not same_camera_results:
+
+        print(
+            "NONE"
+        )
+
+
+    else:
+
+        for result in same_camera_results:
+
+            print(
+                f"c{result['camera_id']}:"
+                f"{result['local_track_id']}"
+                f" -> "
+                f"GID {result['global_id']}"
+                f" | CORE support="
+                f"c{result['support_camera_id']}:"
+                f"{result['support_local_track_id']}"
+                f" | gap="
+                f"{result['gap']}"
+                f" | ReID="
+                f"{result['direct_similarity']:.4f}"
+                f" | center="
+                f"{result['center_distance']:.2f}"
+                f" | bottom="
+                f"{result['bottom_distance']:.2f}"
+            )
 
 
     # ========================================================
@@ -499,10 +599,6 @@ def main():
 
             final_state = "UNRESOLVED"
 
-
-        # ----------------------------------------------------
-        # Reporting fields for unresolved pending tracks.
-        # ----------------------------------------------------
 
         suggested_gid = None
 
@@ -680,8 +776,30 @@ def main():
 
 
     print(
+        "Pre-final GIDs:",
+        pre_final_gids,
+    )
+
+
+    print(
+        "Pre-final pending:",
+        pre_final_pending,
+    )
+
+
+    print(
+        "Final same-camera continuations:",
+        len(
+            same_camera_results
+        ),
+    )
+
+
+    print(
         "Final GIDs:",
-        len(manager.identities),
+        len(
+            manager.identities
+        ),
     )
 
 
@@ -718,10 +836,6 @@ def main():
             identity.summary()
         )
 
-
-    # ========================================================
-    # FINAL OUTPUT LOCATION
-    # ========================================================
 
     print()
 

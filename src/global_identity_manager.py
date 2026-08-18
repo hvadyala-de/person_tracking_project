@@ -64,23 +64,7 @@ class AssignmentResult:
 
     match: MatchResult
 
-    # --------------------------------------------------------
-    # New provenance information.
-    #
-    # None
-    #     no identity membership was created
-    #
-    # CORE
-    #     trusted member allowed to propagate identity
-    #
-    # RELAXED
-    #     accepted member that is NOT allowed to propagate
-    #     positive identity evidence
-    # --------------------------------------------------------
-
     trust_level: Optional[str] = None
-
-    # Human-readable decision reason for diagnostics.
     reason: Optional[str] = None
 
 
@@ -99,38 +83,16 @@ class GlobalIdentityManager:
 
         self.next_global_id = 1
 
-
-        # ----------------------------------------------------
-        # Unresolved / ambiguous tracklets.
-        # ----------------------------------------------------
-
         self.pending_tracklets = {}
-
-
-        # ----------------------------------------------------
-        # Terrace ground-plane homographies.
-        #
-        # None means positive geometry evidence is unavailable.
-        #
-        # In that situation appearance-only matches will NOT
-        # automatically modify an existing GID.
-        # ----------------------------------------------------
 
         self.homographies = homographies
 
 
         # ====================================================
-        # APPEARANCE-ONLY FALLBACK THRESHOLDS
+        # APPEARANCE FALLBACK THRESHOLDS
         #
-        # These preserve the original appearance evaluation
-        # interface.
-        #
-        # IMPORTANT:
-        #
-        # STRONG no longer means "safe to merge".
-        #
-        # In assign_tracklet(), appearance-only STRONG and
-        # PENDING are both held unresolved.
+        # Appearance-only STRONG is only a hypothesis.
+        # It is not direct merge permission.
         # ====================================================
 
         self.same_camera_strong = 0.92
@@ -141,42 +103,17 @@ class GlobalIdentityManager:
 
 
         # ====================================================
-        # VALIDATED TERRACE EVIDENCE POLICY
-        #
-        # Experimental dataset-specific thresholds.
-        #
-        # They are NOT universal production thresholds.
+        # STRICT / CORE CROSS-CAMERA POLICY
         # ====================================================
-
-        # ----------------------------------------------------
-        # STRICT / CORE bootstrap
-        #
-        # Used to:
-        #
-        #   1. bootstrap an existing singleton into a trusted
-        #      geometry-anchored identity
-        #
-        #   2. add further CORE members
-        #
-        #   3. create a CORE identity from a pending pair
-        # ----------------------------------------------------
 
         self.strict_appearance_min = 0.88
 
         self.strict_geometry_median_max = 20.0
 
 
-        # ----------------------------------------------------
-        # RELAXED expansion
-        #
-        # Used ONLY for an already geometry-anchored GID.
-        #
-        # Positive geometry must come directly from a CORE
-        # member.
-        #
-        # A RELAXED member can belong to the GID, but it can
-        # never become a source of positive propagation.
-        # ----------------------------------------------------
+        # ====================================================
+        # RELAXED CORE-SUPPORTED CROSS-CAMERA POLICY
+        # ====================================================
 
         self.relaxed_gid_appearance_min = 0.84
 
@@ -188,30 +125,39 @@ class GlobalIdentityManager:
 
 
         # ====================================================
+        # SAME-CAMERA CORE CONTINUATION POLICY
+        #
+        # Validated conservative rule:
+        #
+        # same camera
+        # CORE positive support
+        # no overlap
+        # gap <= 15
+        # direct ReID >= .92
+        # center distance <= 50 px
+        # bottom distance <= 50 px
+        #
+        # Accepted member becomes RELAXED.
+        # ====================================================
+
+        self.same_camera_continuation_max_gap = 15
+
+        self.same_camera_continuation_reid_min = 0.92
+
+        self.same_camera_continuation_center_max = 50.0
+
+        self.same_camera_continuation_bottom_max = 50.0
+
+
+        # ====================================================
         # IDENTITY PROVENANCE
         # ====================================================
 
-        # GIDs that have been established using trusted
-        # cross-camera geometry.
         self.anchored_gids = set()
 
-
-        # gid -> {(camera_id, local_track_id), ...}
-        #
-        # Only these members may propagate positive geometry
-        # support.
         self.core_members = defaultdict(
             set
         )
-
-
-        # ----------------------------------------------------
-        # Tracklet embedding lookup.
-        #
-        # We keep the direct embedding for every assigned
-        # member so relaxed evidence can be evaluated against
-        # the exact CORE member that supplied geometry.
-        # ----------------------------------------------------
 
         self.member_embeddings = {}
 
@@ -294,6 +240,238 @@ class GlobalIdentityManager:
         ] = np.asarray(
             embedding,
             dtype=np.float32,
+        )
+
+
+    # ========================================================
+    # DETECTION HELPERS
+    # ========================================================
+
+    def first_detection(
+        self,
+        tracklet,
+    ):
+
+        if (
+            tracklet is None
+            or not tracklet.detections
+        ):
+
+            return None
+
+
+        return min(
+            tracklet.detections,
+            key=lambda detection:
+                detection.frame,
+        )
+
+
+    def last_detection(
+        self,
+        tracklet,
+    ):
+
+        if (
+            tracklet is None
+            or not tracklet.detections
+        ):
+
+            return None
+
+
+        return max(
+            tracklet.detections,
+            key=lambda detection:
+                detection.frame,
+        )
+
+
+    def bbox_center(
+        self,
+        detection,
+    ):
+
+        x = (
+            detection.x1
+            + detection.x2
+        ) / 2.0
+
+
+        y = (
+            detection.y1
+            + detection.y2
+        ) / 2.0
+
+
+        return np.asarray(
+            [
+                x,
+                y,
+            ],
+            dtype=np.float32,
+        )
+
+
+    def bbox_bottom_center(
+        self,
+        detection,
+    ):
+
+        x = (
+            detection.x1
+            + detection.x2
+        ) / 2.0
+
+
+        y = detection.y2
+
+
+        return np.asarray(
+            [
+                x,
+                y,
+            ],
+            dtype=np.float32,
+        )
+
+
+    def chronological_pair(
+        self,
+        first,
+        second,
+    ):
+
+        if (
+            first.start_frame
+            <= second.start_frame
+        ):
+
+            return (
+                first,
+                second,
+            )
+
+
+        return (
+            second,
+            first,
+        )
+
+
+    def same_camera_temporal_stats(
+        self,
+        first,
+        second,
+    ):
+
+        first, second = (
+            self.chronological_pair(
+                first,
+                second,
+            )
+        )
+
+
+        gap = (
+            second.start_frame
+            - first.end_frame
+            - 1
+        )
+
+
+        overlap_start = max(
+            first.start_frame,
+            second.start_frame,
+        )
+
+
+        overlap_end = min(
+            first.end_frame,
+            second.end_frame,
+        )
+
+
+        overlap = max(
+            0,
+            overlap_end
+            - overlap_start
+            + 1,
+        )
+
+
+        return (
+            gap,
+            overlap,
+        )
+
+
+    def same_camera_endpoint_distance(
+        self,
+        first,
+        second,
+    ):
+
+        first, second = (
+            self.chronological_pair(
+                first,
+                second,
+            )
+        )
+
+
+        end_detection = (
+            self.last_detection(
+                first
+            )
+        )
+
+
+        start_detection = (
+            self.first_detection(
+                second
+            )
+        )
+
+
+        if (
+            end_detection is None
+            or start_detection is None
+        ):
+
+            return (
+                None,
+                None,
+            )
+
+
+        center_distance = float(
+            np.linalg.norm(
+                self.bbox_center(
+                    end_detection
+                )
+                - self.bbox_center(
+                    start_detection
+                )
+            )
+        )
+
+
+        bottom_distance = float(
+            np.linalg.norm(
+                self.bbox_bottom_center(
+                    end_detection
+                )
+                - self.bbox_bottom_center(
+                    start_detection
+                )
+            )
+        )
+
+
+        return (
+            center_distance,
+            bottom_distance,
         )
 
 
@@ -396,7 +574,7 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # CREATE NEW GID
+    # CREATE NEW IDENTITY
     # ========================================================
 
     def create_identity(
@@ -459,7 +637,7 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # ADD TRACKLET TO EXISTING GID
+    # ADD TO EXISTING IDENTITY
     # ========================================================
 
     def add_to_identity(
@@ -512,13 +690,11 @@ class GlobalIdentityManager:
             )
 
 
-        # ----------------------------------------------------
-        # RELAXED is deliberately NOT added to core_members.
-        # ----------------------------------------------------
+        # RELAXED intentionally does not enter core_members.
 
 
     # ========================================================
-    # SCORE ONE IDENTITY
+    # IDENTITY SCORE
     # ========================================================
 
     def score_identity(
@@ -547,12 +723,13 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # MEMBER TRACKLET LOOKUP
+    # TRACKLET LOOKUP
     # ========================================================
 
-    def get_member_tracklet(
+    def get_tracklet(
         self,
-        member,
+        camera_id,
+        local_track_id,
         tracklet_lookup,
     ):
 
@@ -562,14 +739,14 @@ class GlobalIdentityManager:
 
 
         camera = normalize_camera_id(
-            member.camera_id
+            camera_id
         )
 
 
         result = tracklet_lookup.get(
             (
                 camera,
-                member.local_track_id,
+                local_track_id,
             )
         )
 
@@ -582,13 +759,26 @@ class GlobalIdentityManager:
         return tracklet_lookup.get(
             (
                 f"c{camera}",
-                member.local_track_id,
+                local_track_id,
             )
         )
 
 
+    def get_member_tracklet(
+        self,
+        member,
+        tracklet_lookup,
+    ):
+
+        return self.get_tracklet(
+            member.camera_id,
+            member.local_track_id,
+            tracklet_lookup,
+        )
+
+
     # ========================================================
-    # STRICT GEOMETRY
+    # GEOMETRY THRESHOLDS
     # ========================================================
 
     def is_strict_geometry(
@@ -611,10 +801,6 @@ class GlobalIdentityManager:
             <= self.strict_geometry_median_max
         )
 
-
-    # ========================================================
-    # RELAXED CORE GEOMETRY
-    # ========================================================
 
     def is_relaxed_core_geometry(
         self,
@@ -651,15 +837,10 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # ALL CROSS-CAMERA GEOMETRY CONTRADICTIONS
+    # CROSS-CAMERA CONTRADICTION
     #
-    # IMPORTANT:
-    #
-    # CORE and RELAXED members can both VETO a candidate.
-    #
-    # RELAXED members cannot provide positive propagation,
-    # but synchronized contradictory geometry remains valid
-    # negative evidence.
+    # Any member, CORE or RELAXED, may provide negative
+    # evidence.
     # ========================================================
 
     def identity_geometry_contradictions(
@@ -758,10 +939,6 @@ class GlobalIdentityManager:
         return contradictions
 
 
-    # ========================================================
-    # BACKWARD-COMPATIBLE BOOLEAN GEOMETRY VETO
-    # ========================================================
-
     def identity_geometry_contradicted(
         self,
         candidate_tracklet,
@@ -779,14 +956,7 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # STRICT POSITIVE SUPPORT ROWS
-    #
-    # Unanchored GID:
-    #     any cross-camera existing member may establish the
-    #     initial trusted geometry anchor.
-    #
-    # Anchored GID:
-    #     ONLY CORE members may provide positive support.
+    # STRICT POSITIVE CROSS-CAMERA SUPPORT
     # ========================================================
 
     def strict_support_rows(
@@ -852,16 +1022,9 @@ class GlobalIdentityManager:
             )
 
 
-            # ------------------------------------------------
-            # Once anchored, positive geometry can ONLY come
-            # from CORE.
-            # ------------------------------------------------
-
             if (
                 gid_is_anchored
-
                 and
-
                 member_key
                 not in self.core_members[
                     global_id
@@ -944,15 +1107,7 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # RELAXED CORE SUPPORT ROWS
-    #
-    # A candidate may be accepted as RELAXED only when a CORE
-    # member supplies BOTH:
-    #
-    #   1. direct appearance >= 0.86
-    #   2. synchronized geometry support
-    #
-    # RELAXED members are never considered here.
+    # RELAXED CORE-SUPPORTED CROSS-CAMERA SUPPORT
     # ========================================================
 
     def relaxed_core_support_rows(
@@ -1016,10 +1171,6 @@ class GlobalIdentityManager:
                 member.local_track_id,
             )
 
-
-            # ------------------------------------------------
-            # POSITIVE SUPPORT MUST COME FROM CORE.
-            # ------------------------------------------------
 
             if (
                 member_key
@@ -1112,7 +1263,213 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # FIND STRICT EXISTING GID CANDIDATES
+    # SAME-CAMERA CORE CONTINUATION SUPPORT
+    # ========================================================
+
+    def same_camera_core_support_rows(
+        self,
+        global_id,
+        identity,
+        candidate_tracklet,
+        embedding,
+        tracklet_lookup,
+    ):
+
+        rows = []
+
+
+        if global_id not in self.anchored_gids:
+
+            return rows
+
+
+        if candidate_tracklet is None:
+
+            return rows
+
+
+        if tracklet_lookup is None:
+
+            return rows
+
+
+        candidate_camera = (
+            normalize_camera_id(
+                candidate_tracklet.camera_id
+            )
+        )
+
+
+        for member in identity.members:
+
+            member_camera = (
+                normalize_camera_id(
+                    member.camera_id
+                )
+            )
+
+
+            if (
+                member_camera
+                != candidate_camera
+            ):
+
+                continue
+
+
+            member_key = self.member_key(
+                member_camera,
+                member.local_track_id,
+            )
+
+
+            # Positive support comes from CORE only.
+            if (
+                member_key
+                not in self.core_members[
+                    global_id
+                ]
+            ):
+
+                continue
+
+
+            existing_tracklet = (
+                self.get_member_tracklet(
+                    member,
+                    tracklet_lookup,
+                )
+            )
+
+
+            if existing_tracklet is None:
+
+                continue
+
+
+            member_embedding = (
+                self.member_embeddings.get(
+                    member_key
+                )
+            )
+
+
+            if member_embedding is None:
+
+                continue
+
+
+            (
+                gap,
+                overlap,
+            ) = (
+                self.same_camera_temporal_stats(
+                    existing_tracklet,
+                    candidate_tracklet,
+                )
+            )
+
+
+            if overlap != 0:
+
+                continue
+
+
+            if gap < 0:
+
+                continue
+
+
+            if (
+                gap
+                > self.same_camera_continuation_max_gap
+            ):
+
+                continue
+
+
+            (
+                center_distance,
+                bottom_distance,
+            ) = (
+                self.same_camera_endpoint_distance(
+                    existing_tracklet,
+                    candidate_tracklet,
+                )
+            )
+
+
+            if (
+                center_distance is None
+                or bottom_distance is None
+            ):
+
+                continue
+
+
+            if (
+                center_distance
+                > self.same_camera_continuation_center_max
+            ):
+
+                continue
+
+
+            if (
+                bottom_distance
+                > self.same_camera_continuation_bottom_max
+            ):
+
+                continue
+
+
+            direct_similarity = (
+                self.cosine_similarity(
+                    embedding,
+                    member_embedding,
+                )
+            )
+
+
+            if (
+                direct_similarity
+                < self.same_camera_continuation_reid_min
+            ):
+
+                continue
+
+
+            rows.append(
+                {
+                    "camera_id":
+                        member_camera,
+
+                    "local_track_id":
+                        member.local_track_id,
+
+                    "gap":
+                        gap,
+
+                    "overlap":
+                        overlap,
+
+                    "center_distance":
+                        center_distance,
+
+                    "bottom_distance":
+                        bottom_distance,
+
+                    "direct_similarity":
+                        direct_similarity,
+                }
+            )
+
+
+        return rows
+
+
+    # ========================================================
+    # STRICT EXISTING GID CANDIDATES
     # ========================================================
 
     def find_strict_existing_candidates(
@@ -1138,10 +1495,6 @@ class GlobalIdentityManager:
             self.identities.items()
         ):
 
-            # ------------------------------------------------
-            # Same-camera incompatibility veto.
-            # ------------------------------------------------
-
             if identity_has_conflict(
                 candidate_tracklet,
                 identity,
@@ -1151,10 +1504,6 @@ class GlobalIdentityManager:
                 continue
 
 
-            # ------------------------------------------------
-            # Geometry contradiction veto across ALL members.
-            # ------------------------------------------------
-
             if self.identity_geometry_contradicted(
                 candidate_tracklet,
                 identity,
@@ -1163,10 +1512,6 @@ class GlobalIdentityManager:
 
                 continue
 
-
-            # ------------------------------------------------
-            # Positive geometry support.
-            # ------------------------------------------------
 
             support = self.strict_support_rows(
                 gid,
@@ -1187,10 +1532,6 @@ class GlobalIdentityManager:
                 embedding,
             )
 
-
-            # ------------------------------------------------
-            # Strict gallery appearance requirement.
-            # ------------------------------------------------
 
             if (
                 scores["max"]
@@ -1239,7 +1580,7 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # FIND RELAXED CORE-SUPPORTED GID CANDIDATES
+    # RELAXED CROSS-CAMERA CORE CANDIDATES
     # ========================================================
 
     def find_relaxed_core_candidates(
@@ -1261,7 +1602,9 @@ class GlobalIdentityManager:
             return candidates
 
 
-        for gid in self.anchored_gids:
+        for gid in sorted(
+            self.anchored_gids
+        ):
 
             identity = self.identities.get(
                 gid
@@ -1273,10 +1616,6 @@ class GlobalIdentityManager:
                 continue
 
 
-            # ------------------------------------------------
-            # Same-camera incompatibility veto.
-            # ------------------------------------------------
-
             if identity_has_conflict(
                 candidate_tracklet,
                 identity,
@@ -1286,10 +1625,6 @@ class GlobalIdentityManager:
                 continue
 
 
-            # ------------------------------------------------
-            # Negative geometry from ANY member vetoes.
-            # ------------------------------------------------
-
             if self.identity_geometry_contradicted(
                 candidate_tracklet,
                 identity,
@@ -1298,10 +1633,6 @@ class GlobalIdentityManager:
 
                 continue
 
-
-            # ------------------------------------------------
-            # Positive support MUST come from CORE.
-            # ------------------------------------------------
 
             support = (
                 self.relaxed_core_support_rows(
@@ -1372,7 +1703,128 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # FIND STRICT CURRENT <-> PENDING PAIRS
+    # SAME-CAMERA CONTINUATION CANDIDATES
+    # ========================================================
+
+    def find_same_camera_continuation_candidates(
+        self,
+        embedding,
+        candidate_tracklet=None,
+        tracklet_lookup=None,
+    ):
+
+        candidates = []
+
+
+        if (
+            candidate_tracklet is None
+            or tracklet_lookup is None
+        ):
+
+            return candidates
+
+
+        for gid in sorted(
+            self.anchored_gids
+        ):
+
+            identity = self.identities.get(
+                gid
+            )
+
+
+            if identity is None:
+
+                continue
+
+
+            if identity_has_conflict(
+                candidate_tracklet,
+                identity,
+                tracklet_lookup,
+            ):
+
+                continue
+
+
+            # Same-camera continuation cannot override a
+            # cross-camera geometry contradiction.
+            if self.identity_geometry_contradicted(
+                candidate_tracklet,
+                identity,
+                tracklet_lookup,
+            ):
+
+                continue
+
+
+            support = (
+                self.same_camera_core_support_rows(
+                    gid,
+                    identity,
+                    candidate_tracklet,
+                    embedding,
+                    tracklet_lookup,
+                )
+            )
+
+
+            if not support:
+
+                continue
+
+
+            support.sort(
+                key=lambda row:
+                    (
+                        row[
+                            "direct_similarity"
+                        ],
+                        -row[
+                            "gap"
+                        ],
+                    ),
+                reverse=True,
+            )
+
+
+            candidates.append(
+                {
+                    "global_id":
+                        gid,
+
+                    "support":
+                        support,
+
+                    "best":
+                        support[0],
+                }
+            )
+
+
+        candidates.sort(
+            key=lambda item:
+                (
+                    item[
+                        "best"
+                    ][
+                        "direct_similarity"
+                    ],
+                    -item[
+                        "best"
+                    ][
+                        "gap"
+                    ],
+                ),
+            reverse=True,
+        )
+
+
+        return candidates
+
+
+    # ========================================================
+    # STRICT CURRENT <-> PENDING CROSS-CAMERA PAIRS
     # ========================================================
 
     def find_strict_pending_candidates(
@@ -1411,7 +1863,6 @@ class GlobalIdentityManager:
             self.pending_tracklets.items()
         ):
 
-            # Do not match a pending entry to itself.
             if pending_key == current_key:
 
                 continue
@@ -1426,7 +1877,6 @@ class GlobalIdentityManager:
             )
 
 
-            # Strict geometry anchors are cross-camera.
             if pending_camera == camera_id:
 
                 continue
@@ -1440,27 +1890,12 @@ class GlobalIdentityManager:
             if pending_tracklet is None:
 
                 pending_tracklet = (
-                    tracklet_lookup.get(
-                        (
-                            pending_camera,
-                            pending[
-                                "local_track_id"
-                            ],
-                        )
-                    )
-                )
-
-
-            if pending_tracklet is None:
-
-                pending_tracklet = (
-                    tracklet_lookup.get(
-                        (
-                            f"c{pending_camera}",
-                            pending[
-                                "local_track_id"
-                            ],
-                        )
+                    self.get_tracklet(
+                        pending_camera,
+                        pending[
+                            "local_track_id"
+                        ],
+                        tracklet_lookup,
                     )
                 )
 
@@ -1543,14 +1978,7 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # APPEARANCE-ONLY BEST AND SECOND-BEST GID
-    #
-    # This method is retained for compatibility and for the
-    # PENDING / NEW fallback.
-    #
-    # IMPORTANT:
-    #
-    # A high appearance result here is NOT permission to merge.
+    # APPEARANCE-ONLY BEST GID
     # ========================================================
 
     def find_best_identity(
@@ -1572,37 +2000,19 @@ class GlobalIdentityManager:
             self.identities.items()
         ):
 
-            # =================================================
-            # GATE 1:
-            # SAME-CAMERA SPATIOTEMPORAL CONFLICT
-            # =================================================
-
             if (
                 candidate_tracklet is not None
                 and tracklet_lookup is not None
             ):
 
-                conflict = (
-                    identity_has_conflict(
-                        candidate_tracklet,
-                        identity,
-                        tracklet_lookup,
-                    )
-                )
-
-
-                if conflict:
+                if identity_has_conflict(
+                    candidate_tracklet,
+                    identity,
+                    tracklet_lookup,
+                ):
 
                     continue
 
-
-            # =================================================
-            # GATE 2:
-            # CROSS-CAMERA GEOMETRY CONTRADICTION
-            #
-            # Geometry contradiction remains a hard veto even
-            # for appearance fallback candidate ranking.
-            # =================================================
 
             if (
                 candidate_tracklet is not None
@@ -1610,23 +2020,14 @@ class GlobalIdentityManager:
                 and self.homographies is not None
             ):
 
-                contradicted = (
-                    self.identity_geometry_contradicted(
-                        candidate_tracklet,
-                        identity,
-                        tracklet_lookup,
-                    )
-                )
-
-
-                if contradicted:
+                if self.identity_geometry_contradicted(
+                    candidate_tracklet,
+                    identity,
+                    tracklet_lookup,
+                ):
 
                     continue
 
-
-            # =================================================
-            # APPEARANCE SCORE
-            # =================================================
 
             scores = self.score_identity(
                 identity,
@@ -1714,21 +2115,7 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # EVALUATE APPEARANCE
-    #
-    # IMPORTANT:
-    #
-    # evaluate() remains READ-ONLY.
-    #
-    # STRONG here means:
-    #
-    #     strong appearance hypothesis
-    #
-    # It does NOT mean:
-    #
-    #     automatically safe to modify a GID
-    #
-    # assign_tracklet() applies the evidence policy.
+    # READ-ONLY APPEARANCE EVALUATION
     # ========================================================
 
     def evaluate(
@@ -1819,9 +2206,7 @@ class GlobalIdentityManager:
         if (
             best["max"]
             >= strong_threshold
-
             and
-
             best["topk"]
             >= pending_threshold
         ):
@@ -1893,7 +2278,7 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # BUILD MATCH RESULT FROM EXISTING-GID CANDIDATES
+    # BUILD MATCH RESULT FROM CANDIDATES
     # ========================================================
 
     def candidate_match_result(
@@ -1934,9 +2319,7 @@ class GlobalIdentityManager:
         else:
 
             second_gid = None
-
             second_topk = None
-
             margin = None
 
 
@@ -1975,7 +2358,7 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # ADD PENDING TRACKLET
+    # ADD PENDING
     # ========================================================
 
     def add_pending(
@@ -2026,7 +2409,7 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # CREATE STRICT CORE ANCHOR FROM PENDING PAIR
+    # CREATE CORE ANCHOR FROM PENDING PAIR
     # ========================================================
 
     def create_core_anchor_from_pending(
@@ -2058,10 +2441,6 @@ class GlobalIdentityManager:
         )
 
 
-        # ----------------------------------------------------
-        # Pending member becomes first CORE member.
-        # ----------------------------------------------------
-
         gid = self.create_identity(
             camera_id=
                 pending_camera,
@@ -2091,10 +2470,6 @@ class GlobalIdentityManager:
         )
 
 
-        # ----------------------------------------------------
-        # Current member becomes second CORE member.
-        # ----------------------------------------------------
-
         self.add_to_identity(
             global_id=
                 gid,
@@ -2119,10 +2494,6 @@ class GlobalIdentityManager:
         )
 
 
-        # ----------------------------------------------------
-        # Remove resolved pending entries.
-        # ----------------------------------------------------
-
         self.pending_tracklets.pop(
             pending_candidate[
                 "pending_key"
@@ -2144,30 +2515,7 @@ class GlobalIdentityManager:
 
 
     # ========================================================
-    # EVIDENCE-GATED ASSIGNMENT
-    #
-    # POLICY:
-    #
-    # 1. STRICT existing evidence
-    #       -> merge as CORE
-    #
-    # 2. RELAXED CORE-supported evidence
-    #       -> merge as RELAXED
-    #
-    # 3. STRICT current <-> pending pair
-    #       -> create geometry-anchored GID
-    #       -> both members CORE
-    #
-    # 4. Appearance-only STRONG
-    #       -> PENDING
-    #
-    # 5. Appearance-only PENDING
-    #       -> PENDING
-    #
-    # 6. Clearly NEW
-    #       -> singleton GID
-    #
-    # Appearance alone NEVER modifies an existing identity.
+    # ASSIGN TRACKLET
     # ========================================================
 
     def assign_tracklet(
@@ -2194,8 +2542,6 @@ class GlobalIdentityManager:
 
         # ====================================================
         # FIRST IDENTITY
-        #
-        # Starts as an UNANCHORED singleton.
         # ====================================================
 
         if not self.identities:
@@ -2249,7 +2595,7 @@ class GlobalIdentityManager:
 
         # ====================================================
         # PRIORITY 1:
-        # STRICT GEOMETRY-SUPPORTED EXISTING GID
+        # STRICT EXISTING CROSS-CAMERA EVIDENCE
         # ====================================================
 
         strict_candidates = (
@@ -2280,21 +2626,12 @@ class GlobalIdentityManager:
             ]
 
 
-            # ------------------------------------------------
-            # First strict geometry event establishes the
-            # existing singleton as CORE.
-            # ------------------------------------------------
-
             if gid not in self.anchored_gids:
 
                 self.bootstrap_identity_as_core(
                     gid
                 )
 
-
-            # ------------------------------------------------
-            # Strict member becomes CORE.
-            # ------------------------------------------------
 
             self.add_to_identity(
                 global_id=
@@ -2352,9 +2689,7 @@ class GlobalIdentityManager:
 
         # ====================================================
         # PRIORITY 2:
-        # RELAXED EXPANSION OF AN ALREADY ANCHORED GID
-        #
-        # Positive evidence must come directly from CORE.
+        # RELAXED CROSS-CAMERA CORE SUPPORT
         # ====================================================
 
         relaxed_candidates = (
@@ -2441,7 +2776,7 @@ class GlobalIdentityManager:
 
         # ====================================================
         # PRIORITY 3:
-        # STRICT CURRENT <-> PENDING GEOMETRY PAIR
+        # STRICT CURRENT <-> PENDING CROSS-CAMERA PAIR
         # ====================================================
 
         pending_candidates = (
@@ -2541,10 +2876,7 @@ class GlobalIdentityManager:
 
 
         # ====================================================
-        # PRIORITY 4:
-        # APPEARANCE-ONLY FALLBACK
-        #
-        # evaluate() is read-only.
+        # APPEARANCE FALLBACK
         # ====================================================
 
         match = self.evaluate(
@@ -2562,16 +2894,7 @@ class GlobalIdentityManager:
         )
 
 
-        # ====================================================
-        # APPEARANCE-ONLY STRONG
-        #
-        # OLD:
-        #     merge directly
-        #
-        # NEW:
-        #     HOLD PENDING
-        # ====================================================
-
+        # Appearance-only STRONG is held.
         if match.status == "STRONG":
 
             self.add_pending(
@@ -2612,10 +2935,7 @@ class GlobalIdentityManager:
             )
 
 
-        # ====================================================
-        # APPEARANCE PENDING
-        # ====================================================
-
+        # Appearance pending is held.
         if match.status == "PENDING":
 
             self.add_pending(
@@ -2657,10 +2977,7 @@ class GlobalIdentityManager:
 
 
         # ====================================================
-        # CLEAR NEW
-        #
-        # Appearance does not sufficiently support any
-        # compatible existing GID.
+        # CLEAR NEW SINGLETON
         # ====================================================
 
         gid = self.create_identity(
@@ -2705,50 +3022,44 @@ class GlobalIdentityManager:
     # ========================================================
     # SAFE PENDING RE-EVALUATION
     #
+    # include_same_camera=False
+    #
+    #     Used DURING chronological processing.
+    #
+    #     Only performs the validated cross-camera
+    #     CORE-supported pending sweep.
+    #
+    #
+    # include_same_camera=True
+    #
+    #     Used ONLY after chronological processing has fully
+    #     stabilized.
+    #
+    #     First performs the same cross-camera sweep, then one
+    #     conservative same-camera CORE continuation pass.
+    #
+    #
     # IMPORTANT:
     #
-    # This method deliberately does NOT use appearance-only
-    # STRONG as permission to merge.
-    #
-    # It reproduces the validated CORE-only pending sweep:
-    #
-    #   pending track
-    #       +
-    #   existing ANCHORED GID
-    #       +
-    #   direct CORE appearance >= 0.86
-    #       +
-    #   shared >= 15
-    #       +
-    #   median geometry <= 18
-    #       +
-    #   no contradiction
-    #
-    #       -> RELAXED
-    #
-    # RELAXED members still do not become CORE.
-    #
-    # Pending tracks that remain unresolved are left pending.
-    # They are NOT converted to NEW merely because appearance
-    # changes later.
+    # No second cross-camera sweep is performed after the
+    # same-camera additions. This prevents the newly added
+    # RELAXED embeddings from changing subsequent chronological
+    # assignment decisions or starting a gallery cascade.
     # ========================================================
 
     def reevaluate_pending(
         self,
         tracklet_lookup=None,
+        include_same_camera=False,
     ):
 
-        resolved_results = []
+        results = []
 
 
-        # ----------------------------------------------------
-        # Repeat because adding one relaxed gallery member can
-        # slightly change GID aggregate appearance scoring.
-        #
-        # Positive geometry must still come directly from CORE,
-        # so RELAXED -> RELAXED geometry propagation remains
-        # impossible.
-        # ----------------------------------------------------
+        # ====================================================
+        # PHASE 1:
+        # CROSS-CAMERA RELAXED CORE SWEEP TO FIXED POINT
+        # ====================================================
 
         changed = True
 
@@ -2765,8 +3076,6 @@ class GlobalIdentityManager:
 
             for key, pending in pending_items:
 
-                # Entry may already have been resolved during
-                # this sweep.
                 if (
                     key
                     not in self.pending_tracklets
@@ -2778,6 +3087,22 @@ class GlobalIdentityManager:
                 tracklet = pending.get(
                     "candidate_tracklet"
                 )
+
+
+                if (
+                    tracklet is None
+                    and tracklet_lookup is not None
+                ):
+
+                    tracklet = self.get_tracklet(
+                        pending[
+                            "camera_id"
+                        ],
+                        pending[
+                            "local_track_id"
+                        ],
+                        tracklet_lookup,
+                    )
 
 
                 if (
@@ -2804,10 +3129,7 @@ class GlobalIdentityManager:
                 )
 
 
-                # ------------------------------------------------
-                # Conservative uniqueness requirement.
-                # ------------------------------------------------
-
+                # Exactly one trusted GID required.
                 if len(candidates) != 1:
 
                     continue
@@ -2860,7 +3182,7 @@ class GlobalIdentityManager:
                 ]
 
 
-                resolved_results.append(
+                results.append(
                     {
                         "camera_id":
                             pending[
@@ -2890,9 +3212,197 @@ class GlobalIdentityManager:
                 changed = True
 
 
-        # ----------------------------------------------------
-        # Report remaining entries without changing them.
-        # ----------------------------------------------------
+        # ====================================================
+        # PHASE 2:
+        # FINAL-ONLY SAME-CAMERA CORE CONTINUATION
+        #
+        # This phase is deliberately disabled by default.
+        #
+        # It must not execute during chronological identity
+        # construction because its RELAXED embeddings would
+        # modify the gallery seen by later tracklets.
+        # ====================================================
+
+        if include_same_camera:
+
+            pending_items = list(
+                self.pending_tracklets.items()
+            )
+
+
+            for key, pending in pending_items:
+
+                if (
+                    key
+                    not in self.pending_tracklets
+                ):
+
+                    continue
+
+
+                tracklet = pending.get(
+                    "candidate_tracklet"
+                )
+
+
+                if (
+                    tracklet is None
+                    and tracklet_lookup is not None
+                ):
+
+                    tracklet = self.get_tracklet(
+                        pending[
+                            "camera_id"
+                        ],
+                        pending[
+                            "local_track_id"
+                        ],
+                        tracklet_lookup,
+                    )
+
+
+                if (
+                    tracklet is None
+                    or tracklet_lookup is None
+                ):
+
+                    continue
+
+
+                candidates = (
+                    self.find_same_camera_continuation_candidates(
+                        embedding=
+                            pending[
+                                "embedding"
+                            ],
+
+                        candidate_tracklet=
+                            tracklet,
+
+                        tracklet_lookup=
+                            tracklet_lookup,
+                    )
+                )
+
+
+                # Exactly one GID is required.
+                if len(candidates) != 1:
+
+                    continue
+
+
+                candidate = candidates[0]
+
+
+                gid = candidate[
+                    "global_id"
+                ]
+
+
+                self.add_to_identity(
+                    global_id=
+                        gid,
+
+                    camera_id=
+                        pending[
+                            "camera_id"
+                        ],
+
+                    local_track_id=
+                        pending[
+                            "local_track_id"
+                        ],
+
+                    start_frame=
+                        pending[
+                            "start_frame"
+                        ],
+
+                    end_frame=
+                        pending[
+                            "end_frame"
+                        ],
+
+                    embedding=
+                        pending[
+                            "embedding"
+                        ],
+
+                    trust_level=
+                        "RELAXED",
+                )
+
+
+                del self.pending_tracklets[
+                    key
+                ]
+
+
+                best = candidate[
+                    "best"
+                ]
+
+
+                results.append(
+                    {
+                        "camera_id":
+                            pending[
+                                "camera_id"
+                            ],
+
+                        "local_track_id":
+                            pending[
+                                "local_track_id"
+                            ],
+
+                        "status":
+                            "STRONG",
+
+                        "global_id":
+                            gid,
+
+                        "trust_level":
+                            "RELAXED",
+
+                        "reason":
+                            "SAME_CAMERA_CORE_CONTINUATION",
+
+                        "support_camera_id":
+                            best[
+                                "camera_id"
+                            ],
+
+                        "support_local_track_id":
+                            best[
+                                "local_track_id"
+                            ],
+
+                        "gap":
+                            best[
+                                "gap"
+                            ],
+
+                        "direct_similarity":
+                            best[
+                                "direct_similarity"
+                            ],
+
+                        "center_distance":
+                            best[
+                                "center_distance"
+                            ],
+
+                        "bottom_distance":
+                            best[
+                                "bottom_distance"
+                            ],
+                    }
+                )
+
+
+        # ====================================================
+        # REPORT REMAINING PENDING
+        # ====================================================
 
         for key, pending in (
             self.pending_tracklets.items()
@@ -2919,7 +3429,7 @@ class GlobalIdentityManager:
             )
 
 
-            resolved_results.append(
+            results.append(
                 {
                     "camera_id":
                         pending[
@@ -2951,7 +3461,7 @@ class GlobalIdentityManager:
             )
 
 
-        return resolved_results
+        return results
 
 
     # ========================================================
