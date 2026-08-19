@@ -26,16 +26,23 @@ from src.terrace_geometry import (
 # ============================================================
 # REPLAY CURRENT FINAL PRODUCTION PIPELINE
 #
-# Important:
+# Current production order:
 #
 # chronological processing
 #     -> cross-camera pending sweeps only
 #
 # final pass
-#     -> cross-camera sweep
-#     -> same-camera continuation
+#     -> cross-camera relaxed CORE sweep
+#     -> same-camera CORE continuation
 #     -> dual-evidence continuation
+#     -> CORE-only high-gallery continuation
 #     -> STOP
+#
+# Final validated production state:
+#
+#     GIDs         = 76
+#     pending      = 92
+#     CORE members = 68
 # ============================================================
 
 def replay_final_production():
@@ -66,6 +73,12 @@ def replay_final_production():
         homographies=homographies
     )
 
+
+    # ========================================================
+    # CHRONOLOGICAL IDENTITY CONSTRUCTION
+    #
+    # Final-only continuation mechanisms remain disabled.
+    # ========================================================
 
     for tracklet, embedding in tracklets:
 
@@ -98,13 +111,6 @@ def replay_final_production():
         )
 
 
-        # ----------------------------------------------------
-        # During chronological construction:
-        #
-        # NO same-camera continuation
-        # NO dual-evidence continuation
-        # ----------------------------------------------------
-
         if (
             result.merged
             or result.created_new
@@ -119,20 +125,24 @@ def replay_final_production():
 
                 include_dual_evidence=
                     False,
+
+                include_core_gallery=
+                    False,
             )
 
 
     # ========================================================
     # FINAL PRODUCTION PASS
     #
-    # This reproduces the current committed production state.
-    #
-    # Order inside manager:
+    # Order inside GlobalIdentityManager:
     #
     # 1. cross-camera relaxed CORE sweep
-    # 2. final same-camera CORE continuation
-    # 3. final dual-evidence continuation
-    # 4. STOP
+    # 2. same-camera CORE continuation
+    # 3. dual-evidence continuation
+    # 4. CORE-only high-gallery continuation
+    # 5. STOP
+    #
+    # No additional cascade is run afterward.
     # ========================================================
 
     final_results = (
@@ -145,6 +155,9 @@ def replay_final_production():
 
             include_dual_evidence=
                 True,
+
+            include_core_gallery=
+                True,
         )
     )
 
@@ -154,6 +167,70 @@ def replay_final_production():
         tracklets,
         tracklet_lookup,
         final_results,
+    )
+
+
+# ============================================================
+# FIND MEMBER GID
+# ============================================================
+
+def find_member_gid(
+    manager,
+    camera_id,
+    local_track_id,
+):
+
+    camera_id = normalize_camera_id(
+        camera_id
+    )
+
+
+    for gid, identity in (
+        manager.identities.items()
+    ):
+
+        for member in identity.members:
+
+            member_camera = (
+                normalize_camera_id(
+                    member.camera_id
+                )
+            )
+
+
+            if (
+                member_camera
+                == camera_id
+
+                and
+
+                member.local_track_id
+                == local_track_id
+            ):
+
+                return gid
+
+
+    return None
+
+
+# ============================================================
+# PRINT FINAL RECOVERY
+# ============================================================
+
+def print_final_recovery(
+    label,
+    result,
+):
+
+    print(
+        f"{label} | "
+        f"c{result['camera_id']}:"
+        f"{result['local_track_id']}"
+        f" -> GID "
+        f"{result['global_id']}"
+        f" | trust="
+        f"{result.get('trust_level')}"
     )
 
 
@@ -181,6 +258,10 @@ def main():
     ) = replay_final_production()
 
 
+    # ========================================================
+    # FINAL RECOVERY GROUPS
+    # ========================================================
+
     same_camera_results = [
         result
 
@@ -205,6 +286,29 @@ def main():
         )
         == "DUAL_EVIDENCE_CONTINUATION"
     ]
+
+
+    core_gallery_results = [
+        result
+
+        for result
+        in final_results
+
+        if result.get(
+            "reason"
+        )
+        == "CORE_GALLERY_CONTINUATION"
+    ]
+
+
+    core_member_count = sum(
+        len(
+            members
+        )
+
+        for members
+        in manager.core_members.values()
+    )
 
 
     print(
@@ -241,14 +345,7 @@ def main():
 
     print(
         "CORE members:",
-        sum(
-            len(
-                members
-            )
-
-            for members
-            in manager.core_members.values()
-        ),
+        core_member_count,
     )
 
 
@@ -268,8 +365,16 @@ def main():
     )
 
 
+    print(
+        "Final CORE-gallery resolutions:",
+        len(
+            core_gallery_results
+        ),
+    )
+
+
     # ========================================================
-    # CONFIRM FINAL RECOVERIES
+    # FINAL RECOVERIES
     # ========================================================
 
     print()
@@ -282,50 +387,56 @@ def main():
     )
 
 
-    if not same_camera_results:
+    if same_camera_results:
+
+        for result in same_camera_results:
+
+            print_final_recovery(
+                "Same-camera",
+                result,
+            )
+
+    else:
 
         print(
             "Same-camera: NONE"
         )
 
 
-    else:
+    if dual_evidence_results:
 
-        for result in same_camera_results:
+        for result in dual_evidence_results:
 
-            print(
-                "Same-camera | "
-                f"c{result['camera_id']}:"
-                f"{result['local_track_id']}"
-                f" -> GID "
-                f"{result['global_id']}"
+            print_final_recovery(
+                "Dual-evidence",
+                result,
             )
 
-
-    if not dual_evidence_results:
+    else:
 
         print(
             "Dual-evidence: NONE"
         )
 
 
+    if core_gallery_results:
+
+        for result in core_gallery_results:
+
+            print_final_recovery(
+                "CORE-gallery",
+                result,
+            )
+
     else:
 
-        for result in dual_evidence_results:
-
-            print(
-                "Dual-evidence | "
-                f"c{result['camera_id']}:"
-                f"{result['local_track_id']}"
-                f" -> GID "
-                f"{result['global_id']}"
-                f" | trust="
-                f"{result.get('trust_level')}"
-            )
+        print(
+            "CORE-gallery: NONE"
+        )
 
 
     # ========================================================
-    # CLASSIFY ALL FINAL REMAINING PENDING TRACKLETS
+    # CLASSIFY FINAL REMAINING PENDING TRACKLETS
     # ========================================================
 
     categories = Counter()
@@ -396,12 +507,15 @@ def main():
         )
 
 
+    total_classified = sum(
+        categories.values()
+    )
+
+
     print()
     print(
         "TOTAL CLASSIFIED:",
-        sum(
-            categories.values()
-        ),
+        total_classified,
     )
 
 
@@ -588,14 +702,65 @@ def main():
 
 
     # ========================================================
-    # SAFETY CHECK:
-    # c1:556 MUST NOT STILL BE PENDING
+    # FINAL STATE SANITY CHECK
+    #
+    # Validate the two final cross-evidence recoveries:
+    #
+    # c1:556 -> GID 63 [RELAXED]
+    # c1:787 -> GID 73 [RELAXED]
     # ========================================================
 
     key_556 = (
         1,
         556,
     )
+
+
+    key_787 = (
+        1,
+        787,
+    )
+
+
+    gid_556 = find_member_gid(
+        manager,
+        1,
+        556,
+    )
+
+
+    gid_787 = find_member_gid(
+        manager,
+        1,
+        787,
+    )
+
+
+    trust_556 = None
+
+    trust_787 = None
+
+
+    if gid_556 is not None:
+
+        trust_556 = (
+            manager.get_member_trust(
+                gid_556,
+                1,
+                556,
+            )
+        )
+
+
+    if gid_787 is not None:
+
+        trust_787 = (
+            manager.get_member_trust(
+                gid_787,
+                1,
+                787,
+            )
+        )
 
 
     print()
@@ -615,54 +780,43 @@ def main():
     )
 
 
-    gid_556 = None
-
-
-    for gid, identity in (
-        manager.identities.items()
-    ):
-
-        for member in identity.members:
-
-            if (
-                normalize_camera_id(
-                    member.camera_id
-                )
-                == 1
-
-                and
-
-                member.local_track_id
-                == 556
-            ):
-
-                gid_556 = gid
-
-                break
-
-
-        if gid_556 is not None:
-
-            break
-
-
     print(
         "c1:556 assigned GID:",
         gid_556,
     )
 
 
-    if gid_556 is not None:
+    print(
+        "c1:556 trust:",
+        trust_556,
+    )
 
-        print(
-            "c1:556 trust:",
-            manager.get_member_trust(
-                gid_556,
-                1,
-                556,
-            ),
-        )
 
+    print()
+
+
+    print(
+        "c1:787 still pending:",
+        key_787
+        in manager.pending_tracklets,
+    )
+
+
+    print(
+        "c1:787 assigned GID:",
+        gid_787,
+    )
+
+
+    print(
+        "c1:787 trust:",
+        trust_787,
+    )
+
+
+    # ========================================================
+    # FINAL VALIDATED PRODUCTION EXPECTATION
+    # ========================================================
 
     expected = (
         len(
@@ -675,7 +829,12 @@ def main():
         len(
             manager.pending_tracklets
         )
-        == 93
+        == 92
+
+        and
+
+        core_member_count
+        == 68
 
         and
 
@@ -693,20 +852,44 @@ def main():
 
         and
 
+        len(
+            core_gallery_results
+        )
+        == 1
+
+        and
+
+        total_classified
+        == 92
+
+        and
+
         key_556
         not in manager.pending_tracklets
 
         and
 
-        gid_556 == 63
+        key_787
+        not in manager.pending_tracklets
 
         and
 
-        manager.get_member_trust(
-            63,
-            1,
-            556,
-        )
+        gid_556
+        == 63
+
+        and
+
+        gid_787
+        == 73
+
+        and
+
+        trust_556
+        == "RELAXED"
+
+        and
+
+        trust_787
         == "RELAXED"
     )
 
