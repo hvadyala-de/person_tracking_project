@@ -400,6 +400,9 @@ def main():
 
                 include_same_camera=
                     False,
+
+                include_dual_evidence=
+                    False,
             )
 
 
@@ -467,14 +470,15 @@ def main():
     # ========================================================
     # FINAL PENDING PASS
     #
-    # This is the ONLY place where same-camera continuation
-    # is enabled.
+    # This is the ONLY place where same-camera and dual-
+    # evidence continuation are enabled.
     #
     # Order inside manager:
     #
     #   1. cross-camera CORE-supported pending sweep
     #   2. one same-camera CORE continuation pass
-    #   3. stop -- no extra cross-camera cascade afterward
+    #   3. one dual-evidence CORE-supported pass
+    #   4. stop -- no extra cross-camera cascade afterward
     # ========================================================
 
     final_pending_results = (
@@ -484,8 +488,24 @@ def main():
 
             include_same_camera=
                 True,
+
+            include_dual_evidence=
+                True,
         )
     )
+
+
+    final_cross_camera_results = [
+        result
+
+        for result
+        in final_pending_results
+
+        if result.get(
+            "reason"
+        )
+        == "RELAXED_CORE_PENDING_SWEEP"
+    ]
 
 
     same_camera_results = [
@@ -498,6 +518,19 @@ def main():
             "reason"
         )
         == "SAME_CAMERA_CORE_CONTINUATION"
+    ]
+
+
+    dual_evidence_results = [
+        result
+
+        for result
+        in final_pending_results
+
+        if result.get(
+            "reason"
+        )
+        == "DUAL_EVIDENCE_CONTINUATION"
     ]
 
 
@@ -538,6 +571,91 @@ def main():
                 f"{result['center_distance']:.2f}"
                 f" | bottom="
                 f"{result['bottom_distance']:.2f}"
+            )
+
+
+    after_same_camera_pending = (
+        pre_final_pending
+        - len(
+            final_cross_camera_results
+        )
+        - len(
+            same_camera_results
+        )
+    )
+
+
+    print()
+    print(
+        "POST-SAME-CAMERA STATE"
+    )
+
+    print(
+        "======================"
+    )
+
+
+    print(
+        "GIDs:",
+        len(
+            manager.identities
+        ),
+    )
+
+
+    print(
+        "Pending before dual-evidence:",
+        after_same_camera_pending,
+    )
+
+
+    print()
+    print(
+        "FINAL DUAL-EVIDENCE CONTINUATIONS"
+    )
+
+    print(
+        "================================="
+    )
+
+
+    if not dual_evidence_results:
+
+        print(
+            "NONE"
+        )
+
+
+    else:
+
+        for result in dual_evidence_results:
+
+            print(
+                f"c{result['camera_id']}:"
+                f"{result['local_track_id']}"
+                f" -> "
+                f"GID {result['global_id']}"
+                f" | SAME CORE="
+                f"c{result['same_support_camera_id']}:"
+                f"{result['same_support_local_track_id']}"
+                f" | gap="
+                f"{result['same_gap']}"
+                f" | same ReID="
+                f"{result['same_direct_similarity']:.4f}"
+                f" | center="
+                f"{result['same_center_distance']:.2f}"
+                f" | bottom="
+                f"{result['same_bottom_distance']:.2f}"
+                f" | CROSS CORE="
+                f"c{result['cross_support_camera_id']}:"
+                f"{result['cross_support_local_track_id']}"
+                f" | cross ReID="
+                f"{result['cross_direct_similarity']:.4f}"
+                f" | shared="
+                f"{result['cross_shared_frames']}"
+                f" | median="
+                f"{result['cross_median_distance']:.2f}"
+                f" | trust=RELAXED"
             )
 
 
@@ -788,9 +906,31 @@ def main():
 
 
     print(
+        "Final cross-camera sweep resolutions:",
+        len(
+            final_cross_camera_results
+        ),
+    )
+
+
+    print(
         "Final same-camera continuations:",
         len(
             same_camera_results
+        ),
+    )
+
+
+    print(
+        "Post-same-camera pending:",
+        after_same_camera_pending,
+    )
+
+
+    print(
+        "Final dual-evidence continuations:",
+        len(
+            dual_evidence_results
         ),
     )
 
@@ -807,6 +947,19 @@ def main():
         "Final pending:",
         len(
             manager.pending_tracklets
+        ),
+    )
+
+
+    print(
+        "Final CORE members:",
+        sum(
+            len(
+                members
+            )
+
+            for members
+            in manager.core_members.values()
         ),
     )
 

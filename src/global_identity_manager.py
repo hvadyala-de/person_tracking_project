@@ -150,6 +150,35 @@ class GlobalIdentityManager:
 
 
         # ====================================================
+        # FINAL DUAL-EVIDENCE CONTINUATION POLICY
+        #
+        # This rule is deliberately weaker than the normal
+        # same-camera ReID threshold ONLY because the same GID
+        # must independently provide trusted same-camera CORE
+        # support AND trusted cross-camera CORE geometry.
+        #
+        # Accepted members become RELAXED and never become
+        # positive-support propagation sources.
+        # ====================================================
+
+        self.dual_same_camera_max_gap = 15
+
+        self.dual_same_camera_reid_min = 0.90
+
+        self.dual_same_camera_center_max = 50.0
+
+        self.dual_same_camera_bottom_max = 50.0
+
+        self.dual_cross_camera_reid_min = 0.85
+
+        self.dual_cross_camera_min_shared_frames = 20
+
+        self.dual_cross_camera_geometry_median_max = 18.0
+
+        self.dual_gid_appearance_min = 0.84
+
+
+        # ====================================================
         # IDENTITY PROVENANCE
         # ====================================================
 
@@ -1469,6 +1498,397 @@ class GlobalIdentityManager:
 
 
     # ========================================================
+    # FINAL DUAL-EVIDENCE SAME-CAMERA CORE SUPPORT
+    # ========================================================
+
+    def dual_same_camera_core_support_rows(
+        self,
+        global_id,
+        identity,
+        candidate_tracklet,
+        embedding,
+        tracklet_lookup,
+    ):
+
+        rows = []
+
+
+        if global_id not in self.anchored_gids:
+
+            return rows
+
+
+        if candidate_tracklet is None:
+
+            return rows
+
+
+        if tracklet_lookup is None:
+
+            return rows
+
+
+        candidate_camera = (
+            normalize_camera_id(
+                candidate_tracklet.camera_id
+            )
+        )
+
+
+        for member in identity.members:
+
+            member_camera = (
+                normalize_camera_id(
+                    member.camera_id
+                )
+            )
+
+
+            if (
+                member_camera
+                != candidate_camera
+            ):
+
+                continue
+
+
+            member_key = self.member_key(
+                member_camera,
+                member.local_track_id,
+            )
+
+
+            # Positive dual evidence comes from CORE only.
+            if (
+                member_key
+                not in self.core_members[
+                    global_id
+                ]
+            ):
+
+                continue
+
+
+            existing_tracklet = (
+                self.get_member_tracklet(
+                    member,
+                    tracklet_lookup,
+                )
+            )
+
+
+            if existing_tracklet is None:
+
+                continue
+
+
+            member_embedding = (
+                self.member_embeddings.get(
+                    member_key
+                )
+            )
+
+
+            if member_embedding is None:
+
+                continue
+
+
+            (
+                gap,
+                overlap,
+            ) = (
+                self.same_camera_temporal_stats(
+                    existing_tracklet,
+                    candidate_tracklet,
+                )
+            )
+
+
+            if overlap != 0:
+
+                continue
+
+
+            if gap < 0:
+
+                continue
+
+
+            if (
+                gap
+                > self.dual_same_camera_max_gap
+            ):
+
+                continue
+
+
+            (
+                center_distance,
+                bottom_distance,
+            ) = (
+                self.same_camera_endpoint_distance(
+                    existing_tracklet,
+                    candidate_tracklet,
+                )
+            )
+
+
+            if (
+                center_distance is None
+                or bottom_distance is None
+            ):
+
+                continue
+
+
+            if (
+                center_distance
+                > self.dual_same_camera_center_max
+            ):
+
+                continue
+
+
+            if (
+                bottom_distance
+                > self.dual_same_camera_bottom_max
+            ):
+
+                continue
+
+
+            direct_similarity = (
+                self.cosine_similarity(
+                    embedding,
+                    member_embedding,
+                )
+            )
+
+
+            if (
+                direct_similarity
+                < self.dual_same_camera_reid_min
+            ):
+
+                continue
+
+
+            rows.append(
+                {
+                    "camera_id":
+                        member_camera,
+
+                    "local_track_id":
+                        member.local_track_id,
+
+                    "gap":
+                        gap,
+
+                    "overlap":
+                        overlap,
+
+                    "center_distance":
+                        center_distance,
+
+                    "bottom_distance":
+                        bottom_distance,
+
+                    "direct_similarity":
+                        direct_similarity,
+                }
+            )
+
+
+        return rows
+
+
+    # ========================================================
+    # FINAL DUAL-EVIDENCE CROSS-CAMERA CORE SUPPORT
+    # ========================================================
+
+    def dual_cross_camera_core_support_rows(
+        self,
+        global_id,
+        identity,
+        candidate_tracklet,
+        embedding,
+        tracklet_lookup,
+    ):
+
+        rows = []
+
+
+        if global_id not in self.anchored_gids:
+
+            return rows
+
+
+        if self.homographies is None:
+
+            return rows
+
+
+        if candidate_tracklet is None:
+
+            return rows
+
+
+        if tracklet_lookup is None:
+
+            return rows
+
+
+        candidate_camera = (
+            normalize_camera_id(
+                candidate_tracklet.camera_id
+            )
+        )
+
+
+        for member in identity.members:
+
+            member_camera = (
+                normalize_camera_id(
+                    member.camera_id
+                )
+            )
+
+
+            if (
+                member_camera
+                == candidate_camera
+            ):
+
+                continue
+
+
+            member_key = self.member_key(
+                member_camera,
+                member.local_track_id,
+            )
+
+
+            # Positive dual evidence comes from CORE only.
+            if (
+                member_key
+                not in self.core_members[
+                    global_id
+                ]
+            ):
+
+                continue
+
+
+            existing_tracklet = (
+                self.get_member_tracklet(
+                    member,
+                    tracklet_lookup,
+                )
+            )
+
+
+            if existing_tracklet is None:
+
+                continue
+
+
+            member_embedding = (
+                self.member_embeddings.get(
+                    member_key
+                )
+            )
+
+
+            if member_embedding is None:
+
+                continue
+
+
+            evidence = (
+                evaluate_cross_camera_geometry(
+                    candidate_tracklet,
+                    existing_tracklet,
+                    self.homographies,
+                )
+            )
+
+
+            if (
+                evidence.status
+                != "SUPPORTED"
+            ):
+
+                continue
+
+
+            if (
+                evidence.shared_frames
+                < self.dual_cross_camera_min_shared_frames
+            ):
+
+                continue
+
+
+            if evidence.median_distance is None:
+
+                continue
+
+
+            if (
+                evidence.median_distance
+                > self.dual_cross_camera_geometry_median_max
+            ):
+
+                continue
+
+
+            direct_similarity = (
+                self.cosine_similarity(
+                    embedding,
+                    member_embedding,
+                )
+            )
+
+
+            if (
+                direct_similarity
+                < self.dual_cross_camera_reid_min
+            ):
+
+                continue
+
+
+            rows.append(
+                {
+                    "camera_id":
+                        member_camera,
+
+                    "local_track_id":
+                        member.local_track_id,
+
+                    "shared_frames":
+                        evidence.shared_frames,
+
+                    "median_distance":
+                        evidence.median_distance,
+
+                    "mean_distance":
+                        evidence.mean_distance,
+
+                    "p90_distance":
+                        evidence.p90_distance,
+
+                    "direct_similarity":
+                        direct_similarity,
+                }
+            )
+
+
+        return rows
+
+
+    # ========================================================
     # STRICT EXISTING GID CANDIDATES
     # ========================================================
 
@@ -1814,6 +2234,206 @@ class GlobalIdentityManager:
                         "best"
                     ][
                         "gap"
+                    ],
+                ),
+            reverse=True,
+        )
+
+
+        return candidates
+
+
+    # ========================================================
+    # FINAL DUAL-EVIDENCE CONTINUATION CANDIDATES
+    #
+    # Same GID must independently provide:
+    #
+    #   1. same-camera CORE continuity
+    #   2. cross-camera CORE geometry
+    #
+    # Negative conflict/geometry vetoes remain active.
+    # ========================================================
+
+    def find_dual_evidence_candidates(
+        self,
+        embedding,
+        candidate_tracklet=None,
+        tracklet_lookup=None,
+    ):
+
+        candidates = []
+
+
+        if (
+            candidate_tracklet is None
+            or tracklet_lookup is None
+            or self.homographies is None
+        ):
+
+            return candidates
+
+
+        for gid in sorted(
+            self.anchored_gids
+        ):
+
+            identity = self.identities.get(
+                gid
+            )
+
+
+            if identity is None:
+
+                continue
+
+
+            if identity_has_conflict(
+                candidate_tracklet,
+                identity,
+                tracklet_lookup,
+            ):
+
+                continue
+
+
+            if self.identity_geometry_contradicted(
+                candidate_tracklet,
+                identity,
+                tracklet_lookup,
+            ):
+
+                continue
+
+
+            scores = self.score_identity(
+                identity,
+                embedding,
+            )
+
+
+            if (
+                scores["max"]
+                < self.dual_gid_appearance_min
+            ):
+
+                continue
+
+
+            if (
+                scores["topk"]
+                < self.dual_gid_appearance_min
+            ):
+
+                continue
+
+
+            same_support = (
+                self.dual_same_camera_core_support_rows(
+                    gid,
+                    identity,
+                    candidate_tracklet,
+                    embedding,
+                    tracklet_lookup,
+                )
+            )
+
+
+            if not same_support:
+
+                continue
+
+
+            cross_support = (
+                self.dual_cross_camera_core_support_rows(
+                    gid,
+                    identity,
+                    candidate_tracklet,
+                    embedding,
+                    tracklet_lookup,
+                )
+            )
+
+
+            if not cross_support:
+
+                continue
+
+
+            same_support.sort(
+                key=lambda row:
+                    (
+                        row[
+                            "direct_similarity"
+                        ],
+                        -row[
+                            "gap"
+                        ],
+                    ),
+                reverse=True,
+            )
+
+
+            cross_support.sort(
+                key=lambda row:
+                    (
+                        row[
+                            "direct_similarity"
+                        ],
+                        row[
+                            "shared_frames"
+                        ],
+                        -row[
+                            "median_distance"
+                        ],
+                    ),
+                reverse=True,
+            )
+
+
+            candidates.append(
+                {
+                    "global_id":
+                        gid,
+
+                    "max":
+                        scores["max"],
+
+                    "mean":
+                        scores["mean"],
+
+                    "topk":
+                        scores["topk"],
+
+                    "same_support":
+                        same_support,
+
+                    "cross_support":
+                        cross_support,
+
+                    "best_same":
+                        same_support[0],
+
+                    "best_cross":
+                        cross_support[0],
+                }
+            )
+
+
+        candidates.sort(
+            key=lambda item:
+                (
+                    item[
+                        "best_same"
+                    ][
+                        "direct_similarity"
+                    ],
+                    item[
+                        "best_cross"
+                    ][
+                        "direct_similarity"
+                    ],
+                    item[
+                        "topk"
                     ],
                 ),
             reverse=True,
@@ -3033,24 +3653,30 @@ class GlobalIdentityManager:
     # include_same_camera=True
     #
     #     Used ONLY after chronological processing has fully
-    #     stabilized.
+    #     stabilized. Adds one conservative same-camera CORE
+    #     continuation pass after the cross-camera sweep.
     #
-    #     First performs the same cross-camera sweep, then one
-    #     conservative same-camera CORE continuation pass.
+    #
+    # include_dual_evidence=True
+    #
+    #     Used ONLY in the final production pass. After the
+    #     same-camera phase, adds one dual-evidence pass where
+    #     the SAME GID must have independent same-camera CORE
+    #     support and cross-camera CORE geometry support.
     #
     #
     # IMPORTANT:
     #
-    # No second cross-camera sweep is performed after the
-    # same-camera additions. This prevents the newly added
-    # RELAXED embeddings from changing subsequent chronological
-    # assignment decisions or starting a gallery cascade.
+    # No new cross-camera sweep is performed after either the
+    # same-camera or dual-evidence additions. Final recovered
+    # members are RELAXED and cannot propagate positive trust.
     # ========================================================
 
     def reevaluate_pending(
         self,
         tracklet_lookup=None,
         include_same_camera=False,
+        include_dual_evidence=False,
     ):
 
         results = []
@@ -3395,6 +4021,234 @@ class GlobalIdentityManager:
                         "bottom_distance":
                             best[
                                 "bottom_distance"
+                            ],
+                    }
+                )
+
+
+        # ====================================================
+        # PHASE 3:
+        # FINAL-ONLY DUAL-EVIDENCE CONTINUATION
+        #
+        # This phase runs only after the optional same-camera
+        # phase. It performs ONE pass and then stops.
+        #
+        # There is deliberately no cross-camera reevaluation
+        # after these RELAXED additions.
+        # ====================================================
+
+        if include_dual_evidence:
+
+            pending_items = list(
+                self.pending_tracklets.items()
+            )
+
+
+            for key, pending in pending_items:
+
+                if (
+                    key
+                    not in self.pending_tracklets
+                ):
+
+                    continue
+
+
+                tracklet = pending.get(
+                    "candidate_tracklet"
+                )
+
+
+                if (
+                    tracklet is None
+                    and tracklet_lookup is not None
+                ):
+
+                    tracklet = self.get_tracklet(
+                        pending[
+                            "camera_id"
+                        ],
+                        pending[
+                            "local_track_id"
+                        ],
+                        tracklet_lookup,
+                    )
+
+
+                if (
+                    tracklet is None
+                    or tracklet_lookup is None
+                ):
+
+                    continue
+
+
+                candidates = (
+                    self.find_dual_evidence_candidates(
+                        embedding=
+                            pending[
+                                "embedding"
+                            ],
+
+                        candidate_tracklet=
+                            tracklet,
+
+                        tracklet_lookup=
+                            tracklet_lookup,
+                    )
+                )
+
+
+                # Exactly one dual-evidence GID is required.
+                if len(candidates) != 1:
+
+                    continue
+
+
+                candidate = candidates[0]
+
+
+                gid = candidate[
+                    "global_id"
+                ]
+
+
+                self.add_to_identity(
+                    global_id=
+                        gid,
+
+                    camera_id=
+                        pending[
+                            "camera_id"
+                        ],
+
+                    local_track_id=
+                        pending[
+                            "local_track_id"
+                        ],
+
+                    start_frame=
+                        pending[
+                            "start_frame"
+                        ],
+
+                    end_frame=
+                        pending[
+                            "end_frame"
+                        ],
+
+                    embedding=
+                        pending[
+                            "embedding"
+                        ],
+
+                    trust_level=
+                        "RELAXED",
+                )
+
+
+                del self.pending_tracklets[
+                    key
+                ]
+
+
+                best_same = candidate[
+                    "best_same"
+                ]
+
+
+                best_cross = candidate[
+                    "best_cross"
+                ]
+
+
+                results.append(
+                    {
+                        "camera_id":
+                            pending[
+                                "camera_id"
+                            ],
+
+                        "local_track_id":
+                            pending[
+                                "local_track_id"
+                            ],
+
+                        "status":
+                            "STRONG",
+
+                        "global_id":
+                            gid,
+
+                        "trust_level":
+                            "RELAXED",
+
+                        "reason":
+                            "DUAL_EVIDENCE_CONTINUATION",
+
+                        "gid_max_similarity":
+                            candidate[
+                                "max"
+                            ],
+
+                        "gid_topk_similarity":
+                            candidate[
+                                "topk"
+                            ],
+
+                        "same_support_camera_id":
+                            best_same[
+                                "camera_id"
+                            ],
+
+                        "same_support_local_track_id":
+                            best_same[
+                                "local_track_id"
+                            ],
+
+                        "same_gap":
+                            best_same[
+                                "gap"
+                            ],
+
+                        "same_direct_similarity":
+                            best_same[
+                                "direct_similarity"
+                            ],
+
+                        "same_center_distance":
+                            best_same[
+                                "center_distance"
+                            ],
+
+                        "same_bottom_distance":
+                            best_same[
+                                "bottom_distance"
+                            ],
+
+                        "cross_support_camera_id":
+                            best_cross[
+                                "camera_id"
+                            ],
+
+                        "cross_support_local_track_id":
+                            best_cross[
+                                "local_track_id"
+                            ],
+
+                        "cross_direct_similarity":
+                            best_cross[
+                                "direct_similarity"
+                            ],
+
+                        "cross_shared_frames":
+                            best_cross[
+                                "shared_frames"
+                            ],
+
+                        "cross_median_distance":
+                            best_cross[
+                                "median_distance"
                             ],
                     }
                 )
