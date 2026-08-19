@@ -403,6 +403,9 @@ def main():
 
                 include_dual_evidence=
                     False,
+
+                include_core_gallery=
+                    False,
             )
 
 
@@ -478,7 +481,8 @@ def main():
     #   1. cross-camera CORE-supported pending sweep
     #   2. one same-camera CORE continuation pass
     #   3. one dual-evidence CORE-supported pass
-    #   4. stop -- no extra cross-camera cascade afterward
+    #   4. one CORE-only high-gallery continuation pass
+    #   5. stop -- no extra cross-camera cascade afterward
     # ========================================================
 
     final_pending_results = (
@@ -490,6 +494,9 @@ def main():
                 True,
 
             include_dual_evidence=
+                True,
+
+            include_core_gallery=
                 True,
         )
     )
@@ -531,6 +538,19 @@ def main():
             "reason"
         )
         == "DUAL_EVIDENCE_CONTINUATION"
+    ]
+
+
+    core_gallery_results = [
+        result
+
+        for result
+        in final_pending_results
+
+        if result.get(
+            "reason"
+        )
+        == "CORE_GALLERY_CONTINUATION"
     ]
 
 
@@ -646,6 +666,83 @@ def main():
                 f"{result['same_center_distance']:.2f}"
                 f" | bottom="
                 f"{result['same_bottom_distance']:.2f}"
+                f" | CROSS CORE="
+                f"c{result['cross_support_camera_id']}:"
+                f"{result['cross_support_local_track_id']}"
+                f" | cross ReID="
+                f"{result['cross_direct_similarity']:.4f}"
+                f" | shared="
+                f"{result['cross_shared_frames']}"
+                f" | median="
+                f"{result['cross_median_distance']:.2f}"
+                f" | trust=RELAXED"
+            )
+
+
+    after_dual_evidence_pending = (
+        after_same_camera_pending
+        - len(
+            dual_evidence_results
+        )
+    )
+
+
+    print()
+    print(
+        "POST-DUAL-EVIDENCE STATE"
+    )
+
+    print(
+        "========================"
+    )
+
+
+    print(
+        "GIDs:",
+        len(
+            manager.identities
+        ),
+    )
+
+
+    print(
+        "Pending before CORE-gallery:",
+        after_dual_evidence_pending,
+    )
+
+
+    print()
+    print(
+        "FINAL CORE-ONLY HIGH-GALLERY CONTINUATIONS"
+    )
+
+    print(
+        "=========================================="
+    )
+
+
+    if not core_gallery_results:
+
+        print(
+            "NONE"
+        )
+
+
+    else:
+
+        for result in core_gallery_results:
+
+            print(
+                f"c{result['camera_id']}:"
+                f"{result['local_track_id']}"
+                f" -> "
+                f"GID {result['global_id']}"
+                f" | CORE max="
+                f"{result['core_gallery_max']:.4f}"
+                f" | CORE top3="
+                f"{result['core_gallery_top3']:.4f}"
+                f" | CORE members="
+                f"{result['core_gallery_count']}"
                 f" | CROSS CORE="
                 f"c{result['cross_support_camera_id']}:"
                 f"{result['cross_support_local_track_id']}"
@@ -931,6 +1028,20 @@ def main():
         "Final dual-evidence continuations:",
         len(
             dual_evidence_results
+        ),
+    )
+
+
+    print(
+        "Post-dual-evidence pending:",
+        after_dual_evidence_pending,
+    )
+
+
+    print(
+        "Final CORE-gallery continuations:",
+        len(
+            core_gallery_results
         ),
     )
 
