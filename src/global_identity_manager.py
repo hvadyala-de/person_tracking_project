@@ -17,6 +17,10 @@ try:
         evaluate_cross_camera_geometry,
     )
 
+    from .multicore_consensus import (
+        classify_multicore_consensus,
+    )
+
 except ImportError:
     from global_identity import GlobalIdentity
 
@@ -27,6 +31,10 @@ except ImportError:
 
     from cross_camera_geometry_gate import (
         evaluate_cross_camera_geometry,
+    )
+
+    from multicore_consensus import (
+        classify_multicore_consensus,
     )
 
 
@@ -4006,6 +4014,226 @@ class GlobalIdentityManager:
 
 
         # ====================================================
+        # PRIORITY 4 / 5:
+        # MULTI-CORE CONSENSUS
+        #
+        # This is the validated c2 consensus policy.
+        #
+        # Positive evidence is CORE-only. RELAXED members may
+        # still veto through existing identity conflict and
+        # geometry contradiction checks inside the helper.
+        #
+        # Exactly one eligible GID is required.
+        #
+        #   >= 3 joint CORE supports -> RELAXED merge
+        #   exactly 2 joint supports -> PENDING hold
+        #
+        # The PENDING hold deliberately prevents a duplicate
+        # singleton from being created when trusted multi-CORE
+        # evidence exists but is not yet strong enough to merge.
+        # ====================================================
+
+        multicore = (
+            classify_multicore_consensus(
+                manager=
+                    self,
+
+                embedding=
+                    embedding,
+
+                candidate_tracklet=
+                    candidate_tracklet,
+
+                tracklet_lookup=
+                    tracklet_lookup,
+            )
+        )
+
+
+        if (
+            multicore[
+                "status"
+            ]
+            == "RELAXED"
+        ):
+
+            candidate = multicore[
+                "candidate"
+            ]
+
+
+            gid = candidate[
+                "global_id"
+            ]
+
+
+            self.add_to_identity(
+                global_id=
+                    gid,
+
+                camera_id=
+                    camera_id,
+
+                local_track_id=
+                    local_track_id,
+
+                start_frame=
+                    start_frame,
+
+                end_frame=
+                    end_frame,
+
+                embedding=
+                    embedding,
+
+                trust_level=
+                    "RELAXED",
+            )
+
+
+            self.pending_tracklets.pop(
+                current_key,
+                None,
+            )
+
+
+            match = MatchResult(
+                status=
+                    "STRONG",
+
+                global_id=
+                    gid,
+
+                max_similarity=
+                    candidate[
+                        "core_max"
+                    ],
+
+                mean_similarity=
+                    candidate[
+                        "core_mean"
+                    ],
+
+                topk_similarity=
+                    candidate[
+                        "core_top3"
+                    ],
+
+                second_global_id=None,
+                second_topk_similarity=None,
+                score_margin=None,
+            )
+
+
+            return AssignmentResult(
+                status=
+                    "STRONG",
+
+                global_id=
+                    gid,
+
+                created_new=False,
+                merged=True,
+
+                match=
+                    match,
+
+                trust_level=
+                    "RELAXED",
+
+                reason=
+                    "MULTICORE_CONSENSUS_RELAXED",
+            )
+
+
+        if (
+            multicore[
+                "status"
+            ]
+            == "HOLD"
+        ):
+
+            candidate = multicore[
+                "candidate"
+            ]
+
+
+            gid = candidate[
+                "global_id"
+            ]
+
+
+            self.add_pending(
+                camera_id=
+                    camera_id,
+
+                local_track_id=
+                    local_track_id,
+
+                start_frame=
+                    start_frame,
+
+                end_frame=
+                    end_frame,
+
+                embedding=
+                    embedding,
+
+                candidate_tracklet=
+                    candidate_tracklet,
+            )
+
+
+            match = MatchResult(
+                status=
+                    "PENDING",
+
+                global_id=
+                    gid,
+
+                max_similarity=
+                    candidate[
+                        "core_max"
+                    ],
+
+                mean_similarity=
+                    candidate[
+                        "core_mean"
+                    ],
+
+                topk_similarity=
+                    candidate[
+                        "core_top3"
+                    ],
+
+                second_global_id=None,
+                second_topk_similarity=None,
+                score_margin=None,
+            )
+
+
+            return AssignmentResult(
+                status=
+                    "PENDING",
+
+                global_id=
+                    gid,
+
+                created_new=False,
+                merged=False,
+
+                match=
+                    match,
+
+                trust_level=None,
+
+                reason=
+                    "MULTICORE_CONSENSUS_PENDING_HOLD",
+            )
+
+
+        # ====================================================
+        # PRIORITY 6:
         # APPEARANCE FALLBACK
         # ====================================================
 
