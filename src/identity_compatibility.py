@@ -10,6 +10,46 @@ MIN_CENTER_DISTANCE = 45.0
 
 
 # ============================================================
+# PERSISTENT SAME-CAMERA SEPARATION
+#
+# The original conflict rule above remains unchanged.
+#
+# This secondary rule catches cases where two same-camera
+# tracklets remain consistently separated for a continuous
+# run, even when their image scale makes the original
+# 45-pixel / 0.75-diagonal distance gate too conservative.
+#
+# Validated Terrace examples:
+#
+#   c1:369 <-> c1:382
+#       longest consecutive secondary separation = 9
+#       must NOT be vetoed
+#
+#   c3:12 <-> c3:15
+#       longest consecutive secondary separation = 13
+#       must be vetoed
+#
+# Full c0+c1+c2+c3 candidate replay:
+#
+#   pre-c3 GIDs     = 109
+#   pre-c3 pending  = 162
+#   pre-c3 anchored = 22
+#
+#   pre-existing GID moves = 0
+#   final same-GID candidate conflicts = 0
+#   replay checks = 11/11 PASS
+# ============================================================
+
+PERSISTENT_MAX_IOU_FOR_DIFFERENT = 0.10
+
+PERSISTENT_MIN_ABSOLUTE_DISTANCE = 20.0
+
+PERSISTENT_MIN_RELATIVE_DISTANCE = 0.25
+
+MIN_CONSECUTIVE_SEPARATED_FRAMES = 10
+
+
+# ============================================================
 # CAMERA ID NORMALIZATION
 #
 # Supports:
@@ -134,6 +174,33 @@ def center_distance(a, b):
 
 
 # ============================================================
+# BOTTOM-CENTER DISTANCE
+# ============================================================
+
+def bottom_center_distance(a, b):
+
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+
+    acx = (
+        ax1 + ax2
+    ) / 2.0
+
+    acy = ay2
+
+    bcx = (
+        bx1 + bx2
+    ) / 2.0
+
+    bcy = by2
+
+    return math.hypot(
+        acx - bcx,
+        acy - bcy,
+    )
+
+
+# ============================================================
 # BBOX DIAGONAL
 # ============================================================
 
@@ -162,7 +229,25 @@ def detections_by_frame(
 
 
 # ============================================================
+# DETECTION BBOX
+# ============================================================
+
+def detection_bbox(
+    detection,
+):
+
+    return (
+        detection.x1,
+        detection.y1,
+        detection.x2,
+        detection.y2,
+    )
+
+
+# ============================================================
 # ARE TWO DETECTIONS CLEARLY DIFFERENT PEOPLE?
+#
+# ORIGINAL PRODUCTION RULE
 # ============================================================
 
 def spatially_separated(
@@ -170,18 +255,12 @@ def spatially_separated(
     detection_b,
 ):
 
-    box_a = (
-        detection_a.x1,
-        detection_a.y1,
-        detection_a.x2,
-        detection_a.y2,
+    box_a = detection_bbox(
+        detection_a
     )
 
-    box_b = (
-        detection_b.x1,
-        detection_b.y1,
-        detection_b.x2,
-        detection_b.y2,
+    box_b = detection_bbox(
+        detection_b
     )
 
     iou = bbox_iou(
@@ -220,6 +299,141 @@ def spatially_separated(
         distance
         >= required_distance
     )
+
+
+# ============================================================
+# SECONDARY SCALE-AWARE SEPARATION
+#
+# This rule is intentionally NOT sufficient by itself to
+# declare a tracklet conflict.
+#
+# It is only used together with:
+#
+#   - same-camera observations
+#   - >= MIN_SHARED_FRAMES
+#   - >= MIN_SEPARATED_RATIO of shared observations separated
+#   - >= MIN_CONSECUTIVE_SEPARATED_FRAMES consecutive
+#     separated frames
+#
+# This protects against isolated or sparse tracker overlaps.
+# ============================================================
+
+def persistently_spatially_separated(
+    detection_a,
+    detection_b,
+):
+
+    box_a = detection_bbox(
+        detection_a
+    )
+
+    box_b = detection_bbox(
+        detection_b
+    )
+
+
+    iou = bbox_iou(
+        box_a,
+        box_b,
+    )
+
+
+    if (
+        iou
+        > PERSISTENT_MAX_IOU_FOR_DIFFERENT
+    ):
+
+        return False
+
+
+    scale = max(
+        bbox_diagonal(
+            box_a
+        ),
+
+        bbox_diagonal(
+            box_b
+        ),
+
+        1.0,
+    )
+
+
+    required_distance = max(
+        PERSISTENT_MIN_ABSOLUTE_DISTANCE,
+
+        PERSISTENT_MIN_RELATIVE_DISTANCE
+        * scale,
+    )
+
+
+    center = center_distance(
+        box_a,
+        box_b,
+    )
+
+
+    bottom = bottom_center_distance(
+        box_a,
+        box_b,
+    )
+
+
+    return (
+        center
+        >= required_distance
+
+        or
+
+        bottom
+        >= required_distance
+    )
+
+
+# ============================================================
+# LONGEST CONSECUTIVE FRAME RUN
+# ============================================================
+
+def longest_consecutive_run(
+    frames,
+):
+
+    if not frames:
+        return 0
+
+
+    frames = sorted(
+        frames
+    )
+
+
+    longest = 1
+    current = 1
+
+
+    for previous, current_frame in zip(
+        frames,
+        frames[1:],
+    ):
+
+        if (
+            current_frame
+            == previous + 1
+        ):
+
+            current += 1
+
+            longest = max(
+                longest,
+                current,
+            )
+
+        else:
+
+            current = 1
+
+
+    return longest
 
 
 # ============================================================
@@ -285,6 +499,10 @@ def same_camera_conflict(
         return False
 
 
+    # ========================================================
+    # ORIGINAL PRODUCTION CONFLICT PATH
+    # ========================================================
+
     separated_count = 0
 
 
@@ -308,7 +526,7 @@ def same_camera_conflict(
     )
 
 
-    return (
+    if (
         separated_count
         >= MIN_SEPARATED_FRAMES
 
@@ -316,6 +534,74 @@ def same_camera_conflict(
 
         separated_ratio
         >= MIN_SEPARATED_RATIO
+    ):
+
+        return True
+
+
+    # ========================================================
+    # SECONDARY PERSISTENT-SEPARATION PATH
+    #
+    # A more scale-aware spatial test is allowed only when
+    # the separation is both dominant across the simultaneous
+    # observations and continuously present for a sufficiently
+    # long run.
+    # ========================================================
+
+    persistent_separated_frames = []
+
+
+    for frame in shared_frames:
+
+        if persistently_spatially_separated(
+            candidate_frames[
+                frame
+            ],
+            existing_frames[
+                frame
+            ],
+        ):
+
+            persistent_separated_frames.append(
+                frame
+            )
+
+
+    persistent_separated_count = len(
+        persistent_separated_frames
+    )
+
+
+    persistent_separated_ratio = (
+        persistent_separated_count
+        / len(shared_frames)
+    )
+
+
+    if (
+        persistent_separated_count
+        < MIN_SEPARATED_FRAMES
+    ):
+
+        return False
+
+
+    if (
+        persistent_separated_ratio
+        < MIN_SEPARATED_RATIO
+    ):
+
+        return False
+
+
+    longest_run = longest_consecutive_run(
+        persistent_separated_frames
+    )
+
+
+    return (
+        longest_run
+        >= MIN_CONSECUTIVE_SEPARATED_FRAMES
     )
 
 
