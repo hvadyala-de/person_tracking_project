@@ -1,0 +1,20 @@
+tracker_type: bytetrack
+
+# Strong detections used for first association
+track_high_thresh: 0.25
+
+# Allow weaker detections to recover existing tracks
+track_low_thresh: 0.10
+
+# Do not start a brand-new track from a weak detection
+new_track_thresh: 0.25
+
+# Terrace is 25 FPS.
+# Keep a lost track alive for 3 seconds.
+track_buffer: 75
+
+# Higher is more lenient in Ultralytics' tracker configuration
+match_thresh: 0.85
+
+# Combine detection confidence with association cost
+fuse_score: True

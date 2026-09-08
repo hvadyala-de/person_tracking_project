@@ -14,3 +14,6 @@ crops/
 *.avi
 *.mp4
 *.swp
+
+# Local datasets and calibration assets
+data/
